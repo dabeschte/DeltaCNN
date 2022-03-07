@@ -43,28 +43,6 @@ __device__ __forceinline__ void load_mask(const int tile_start_in_y, const int t
     const int DILATION_X = ENABLE_DILATION ? config.dilation[1] : 1;
     const int DILATION_Y = ENABLE_DILATION ? config.dilation[0] : 1;
     
-    // for (int i_off = 0; i_off < divup(n_in_px, WARP_SIZE); ++i_off) {
-    //     int i = i_off * WARP_SIZE + lane_idx;
-    //     int iter_mask = 0;
-    //     if (i < n_in_px) {
-    //         int y = tile_start_in_y + (i / w_in) * DILATION_Y;
-    //         int x = tile_start_in_x + (i % w_in) * DILATION_X;
-    //         if (y >= 0 && y < dim.in.h && x >= 0 && x < dim.in.w) {
-    //             const int mask_idx = y * dim.in.w + x;
-    //             iter_mask = batch_mask != nullptr ? batch_mask[mask_idx] : 1;
-    //             s_mask[i] = iter_mask;
-    //         } else {
-    //             s_mask[i] = 0;
-    //         }
-    //     }
-    //     if (n_in_px <= 64) {
-    //         iter_mask = __ballot_sync(0xFFFFFFFF, iter_mask);
-    //         reinterpret_cast<uint32_t*>(&t_mask)[i_off] = iter_mask;
-    //     }
-    // }
-    // density = __popcll(t_mask);
-    // return;
-    
     // because in a 1x1 conv, we can directly skip input elements which we can't do for larger convs
     const int STRIDE_FACTOR = KERNEL_SIZE == 1 ? STRIDE : 1;
 
@@ -82,7 +60,6 @@ __device__ __forceinline__ void load_mask(const int tile_start_in_y, const int t
 
     if (n_in_px <= 64) {
         #pragma unroll
-        // for (int i = 0; i < divup(n_in_px, WARP_SIZE); ++i) {
         for (int i = 0; i < 2; ++i) {
             int px_idx = lane_idx + i * WARP_SIZE;
             uint32_t mask = px_idx < n_in_px ? s_mask[px_idx] : 0;
@@ -163,18 +140,12 @@ __device__ __forceinline__ bool is_out_px_active(const int x, const int y, const
     int offset = y * STRIDE * w_in + x * STRIDE;
     mask = mask << offset;
     bool valid = (t_mask & mask) != 0;
-    // if (blockIdx.x == 0 && STRIDE == 2) {
-    //     printf("tId=%i y=%i x=%i t_mask=%llx mask=%llx valid=%i\n", 
-    //         threadIdx.x, y, x, t_mask, mask, (valid?1:0)
-    //     );
-    // }
     return valid;
 }
 
 template<int w_in, int n_in_px>
 __device__ __forceinline__ bool is_px_mask_set(const int x, const int y, const uint64_t t_mask, const uint32_t *s_mask) {
     return n_in_px <= 64 ? ((t_mask & (1LLU << (y * w_in + x))) != 0) : (s_mask[y * w_in + x] != 0);
-    // return n_in_px <= 64 ? (((t_mask >> (y * w_in + x)) & 1) != 0) : (s_mask[y * w_in + x] != 0);
 }
 
 template<int BLOCK_SIZE, int pixelsPerBlockX, int n_pixels_out, int w_in, int n_in_px, int STRIDE, bool ENABLE_DILATION, int KERNEL_SIZE=3> 
@@ -192,7 +163,6 @@ __device__ __forceinline__ void write_mask(uint32_t* out_mask, const int batch, 
             continue;
 
         if ((n_in_px <= 64 && t_mask != 0LLU) || (n_in_px > 64 && density != 0)) {
-            // bool updated = is_out_px_active<STRIDE, w_in, KERNEL_SIZE>(p_x, p_y, t_mask);
             bool updated = false;
 #ifdef ENABLE_METRICS
             int active_inputs = 0;
@@ -370,7 +340,6 @@ __global__ void deltacnn_3x3_sp(
     }
 #endif
 
-    // if (density == 0) {
     if ((n_in_px <= 64 && t_mask == 0LLU) || (n_in_px < 64 && density == 0)) {
         // nothing to do here. set everything to zero and leave
         if (config.set_sparse_zero) {
@@ -657,160 +626,8 @@ __global__ void deltacnn_3x3_sp(
 }
 
 
-template<typename scalar_t = float, int pixelsPerBlockX=3, int pixelsPerBlockY=3, int BLOCK_SIZE=256, int OUT_CHANNELS_PER_BLOCK=32, bool SUB_TILE_SPARSITY=false, bool FULL_DEPTH=false, int STRIDE=1, bool ENABLE_DILATION=false>
-__global__ void deltacnn_3x3_dw_sp(
-    const scalar_t* input,
-    scalar_t* output,
-    const scalar_t* filter,
-    const scalar_t* bias,
-    const uint32_t* mask,
-    uint32_t* out_mask,
-    Dimensions dim,
-    ConvConfig config
-) {
-    const int DILATION_X = ENABLE_DILATION ? config.dilation[1] : 1;
-    const int DILATION_Y = ENABLE_DILATION ? config.dilation[0] : 1;
-    int tile_start_out_y, tile_start_out_x, tile_start_in_y, tile_start_in_x, tile_start_z, batch;
-    calc_tile_indices<pixelsPerBlockX, pixelsPerBlockY, OUT_CHANNELS_PER_BLOCK, STRIDE, FULL_DEPTH, ENABLE_DILATION>(tile_start_out_y, tile_start_out_x, tile_start_in_y, tile_start_in_x, tile_start_z, batch, config, dim);
-
-    const int lane_idx = threadIdx.x % WARP_SIZE;
-    scalar_t* batch_out = output + (batch * dim.out.h * dim.out.w * dim.out.c);
-    const scalar_t* batch_in = input + (batch * dim.in.h * dim.in.w * dim.in.c);
-    const uint32_t* batch_mask = mask == nullptr ? nullptr : mask + (batch * dim.in.h * dim.in.w);
-    
-    const int n_pixels_out = pixelsPerBlockX * pixelsPerBlockY;
-    const int w_in = pixelsPerBlockX + (pixelsPerBlockX-1) * (STRIDE-1) + 2;
-    const int h_in = pixelsPerBlockY + (pixelsPerBlockY-1) * (STRIDE-1) + 2;
-    const int n_in_px = w_in * h_in;
-    const int KERNEL_SIZE = 3;
-
-    __shared__ uint32_t s_mask[n_in_px];
-    uint64_t t_mask = 0LLU;
-    uint32_t density;
-
-#ifdef ENABLE_METRICS
-    if (tile_start_z == 0 && threadIdx.x == 0) {
-        if (DCMetrics::track_filter_reads) {
-            atomicAdd(&d_metrics->n_vals_read_dense, uint64_t(n_in_px * dim.in.c) + KERNEL_SIZE*KERNEL_SIZE*dim.out.c*dim.in.c/config.groups);
-        } else {
-            atomicAdd(&d_metrics->n_vals_read_dense, uint64_t(n_in_px * dim.in.c)); 
-        }
-        atomicAdd(&d_metrics->n_vals_written_dense, uint64_t(n_pixels_out * dim.out.c)); 
-    }
-#endif
-
-    load_mask<BLOCK_SIZE, n_in_px, w_in, ENABLE_DILATION, KERNEL_SIZE, STRIDE>(tile_start_in_y, tile_start_in_x, lane_idx, batch_mask, &s_mask[0], t_mask, density, dim, config);
-
-    if (out_mask != nullptr && tile_start_z == 0) {
-        write_mask<BLOCK_SIZE, pixelsPerBlockX, n_pixels_out, w_in, n_in_px, STRIDE, ENABLE_DILATION>(out_mask, batch, t_mask, &s_mask[0], density, tile_start_out_y, tile_start_out_x, dim, config);
-    }
-
-    if ((n_in_px <= 64 && t_mask == 0LLU) || (n_in_px < 64 && density == 0)) {
-        // nothing to do here. set everything to zero and leave
-        if (config.set_sparse_zero) {
-            set_out_zero<scalar_t, BLOCK_SIZE, n_pixels_out, pixelsPerBlockX, OUT_CHANNELS_PER_BLOCK, FULL_DEPTH, ENABLE_DILATION>(
-                batch_out, bias, tile_start_z, tile_start_out_y, tile_start_out_x, dim, config
-            );
-        }
-        return;
-    }
-#ifdef ENABLE_METRICS
-    else if (tile_start_z == 0 && threadIdx.x == 0) {
-        atomicAdd(&d_metrics->n_vals_written, uint64_t(n_pixels_out * dim.out.c)); 
-    }
-#endif
-
-    const bool requires_boundary_checks = SUB_TILE_SPARSITY || (tile_start_in_x <= 0 || tile_start_in_y <= 0 || tile_start_in_x + pixelsPerBlockX * STRIDE * DILATION_X + 2 >= dim.in.w || tile_start_in_y + pixelsPerBlockY * STRIDE * DILATION_Y + 2 >= dim.in.h); 
-
-    for (int out_c = tile_start_z + threadIdx.x; out_c < dim.out.c && (FULL_DEPTH || out_c < tile_start_z + OUT_CHANNELS_PER_BLOCK); out_c += BLOCK_SIZE) {
-        scalar_t t_out[n_pixels_out];
-        const scalar_t t_bias = bias == nullptr ? 0.0f : bias[out_c];
-        #pragma unroll
-        for (int i = 0; i < n_pixels_out; ++i) {
-            t_out[i] = t_bias;
-        }
-        
-        const scalar_t *in_c_filter = &filter[out_c];
-        scalar_t t_f[9];
-        #pragma unroll
-        for(int f_y = 0; f_y < 3; ++f_y) {
-            #pragma unroll
-            for(int f_x = 0; f_x < 3; ++f_x) { 
-                t_f[f_y*3 + f_x] = in_c_filter[((2-f_y) * 3 + 2 - f_x) * dim.out.c];
-            }
-        }
-        
-        if (requires_boundary_checks) {
-            #pragma unroll
-            for (int in_y = -1; in_y < w_in -1; ++in_y) {
-                #pragma unroll
-                for (int in_x = -1; in_x < w_in -1; ++in_x) {
-                    const bool valid = is_px_mask_set<w_in, n_in_px>(in_x+1, in_y+1, t_mask, s_mask);
-                    if (valid) {
-                        const int in_y_im = (in_y+1) * DILATION_Y + tile_start_in_y;
-                        const int in_x_im = (in_x+1) * DILATION_X + tile_start_in_x;
-                        const scalar_t val = batch_in[(in_y_im * dim.in.w + in_x_im) * dim.in.c + out_c];
-                        const int min_f_y = -in_y;
-                        const int min_f_x = -in_x;  
-                        const int max_f_y = w_in - in_y - 3;
-                        const int max_f_x = w_in - in_x - 3;
-                        const int stride_off_y = (((1-in_y) % STRIDE) + STRIDE) % STRIDE;
-                        const int stride_off_x = (((1-in_x) % STRIDE) + STRIDE) % STRIDE;
-                        #pragma unroll
-                        for (int f_y = Utils::constexpr_max(-1 + stride_off_y, min_f_y); f_y <= Utils::constexpr_min(1, max_f_y); f_y += STRIDE) {
-                            #pragma unroll
-                            for (int f_x = Utils::constexpr_max(-1 + stride_off_x, min_f_x); f_x <= Utils::constexpr_min(1, max_f_x); f_x += STRIDE) {
-                                t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)] += val * t_f[(f_y+1)*3 + f_x+1];
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            #pragma unroll
-            for (int in_y = -1; in_y < w_in -1; ++in_y) {
-                #pragma unroll
-                for (int in_x = -1; in_x < w_in -1; ++in_x) {
-                    const int in_y_im = (in_y+1) * DILATION_Y + tile_start_in_y;
-                    const int in_x_im = (in_x+1) * DILATION_X + tile_start_in_x;
-                    const scalar_t val = batch_in[(in_y_im * dim.in.w + in_x_im) * dim.in.c + out_c];
-                    const int min_f_y = -in_y;
-                    const int min_f_x = -in_x;  
-                    const int max_f_y = w_in - in_y - 3;
-                    const int max_f_x = w_in - in_x - 3;
-                    const int stride_off_y = (((1-in_y) % STRIDE) + STRIDE) % STRIDE;
-                    const int stride_off_x = (((1-in_x) % STRIDE) + STRIDE) % STRIDE;
-                    #pragma unroll
-                    for (int f_y = Utils::constexpr_max(-1 + stride_off_y, min_f_y); f_y <= Utils::constexpr_min(1, max_f_y); f_y += STRIDE) {
-                        #pragma unroll
-                        for (int f_x = Utils::constexpr_max(-1 + stride_off_x, min_f_x); f_x <= Utils::constexpr_min(1, max_f_x); f_x += STRIDE) {
-                            t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)] += val * t_f[(f_y+1)*3 + f_x+1];
-                        }
-                    }
-                }
-            }
-        }
-
-        #pragma unroll
-        for (int out_y = 0; out_y < pixelsPerBlockY; ++out_y) {
-            const int out_y_im = out_y * DILATION_Y + tile_start_out_y;
-            #pragma unroll
-            for (int out_x = 0; out_x < pixelsPerBlockX; ++out_x) {
-                const int out_x_im = out_x * DILATION_X + tile_start_out_x;
-                const bool valid = out_y_im < dim.out.h && out_x_im < dim.out.w;
-                if (valid) {
-                    batch_out[(out_y_im * dim.out.w + out_x_im) * dim.out.c + out_c] = t_out[out_y*pixelsPerBlockX + out_x];
-                }
-            }
-        }
-    }
-}
-
-
-
-
-template<typename scalar_t = float, int pixelsPerBlockX=3, int pixelsPerBlockY=3, int BLOCK_SIZE=256, int OUT_CHANNELS_PER_BLOCK=32, bool SUB_TILE_SPARSITY=false, bool FULL_DEPTH=false, int STRIDE=1, bool ENABLE_DILATION=false>
-__global__ void deltacnn_5x5_dw_sp(
+template<typename scalar_t = float, int KERNEL_SIZE=3, int pixelsPerBlockX=3, int pixelsPerBlockY=3, int BLOCK_SIZE=256, int OUT_CHANNELS_PER_BLOCK=32, bool SUB_TILE_SPARSITY=false, bool FULL_DEPTH=false, int STRIDE=1, bool ENABLE_DILATION=false>
+__global__ void deltacnn_dw_conv_sp(
     const scalar_t* input,
     scalar_t* output,
     const scalar_t* filter,
@@ -832,7 +649,6 @@ __global__ void deltacnn_5x5_dw_sp(
     const uint32_t* batch_mask = mask == nullptr ? nullptr : mask + (batch * dim.in.h * dim.in.w);
     
     const int n_pixels_out = pixelsPerBlockX * pixelsPerBlockY;
-    const int KERNEL_SIZE = 5;
     const int K_HALF = (KERNEL_SIZE-1) / 2;
     const int w_in = pixelsPerBlockX + (pixelsPerBlockX-1) * (STRIDE-1) + 2 * K_HALF;
     const int h_in = pixelsPerBlockY + (pixelsPerBlockY-1) * (STRIDE-1) + 2 * K_HALF;
@@ -840,186 +656,6 @@ __global__ void deltacnn_5x5_dw_sp(
     const int lane_idx = threadIdx.x % WARP_SIZE;
 
     __shared__ uint32_t s_mask[n_in_px];
-    uint32_t density = 0;
-    uint64_t t_mask = 0LLU;
-
-#ifdef ENABLE_METRICS
-    if (tile_start_z == 0 && threadIdx.x == 0) {
-        if (DCMetrics::track_filter_reads) {
-            atomicAdd(&d_metrics->n_vals_read_dense, uint64_t(n_in_px * dim.in.c) + KERNEL_SIZE*KERNEL_SIZE*dim.out.c*dim.in.c/config.groups);
-        } else {
-            atomicAdd(&d_metrics->n_vals_read_dense, uint64_t(n_in_px * dim.in.c)); 
-        }
-        atomicAdd(&d_metrics->n_vals_written_dense, uint64_t(n_pixels_out * dim.out.c)); 
-    }
-#endif
-
-    load_mask<BLOCK_SIZE, n_in_px, w_in, ENABLE_DILATION>(tile_start_in_y, tile_start_in_x, lane_idx, batch_mask, &s_mask[0], t_mask, density, dim, config);
-
-    if (out_mask != nullptr && tile_start_z == 0) {
-        write_mask<BLOCK_SIZE, pixelsPerBlockX, n_pixels_out, w_in, n_in_px, STRIDE, ENABLE_DILATION, 5>(out_mask, batch, t_mask, &s_mask[0], density, tile_start_out_y, tile_start_out_x, dim, config);
-    }
-#ifdef ENABLE_METRICS
-    else if (tile_start_z == 0 && threadIdx.x == 0) {
-        atomicAdd(&d_metrics->n_vals_written, uint64_t(n_pixels_out * dim.out.c)); 
-    }
-#endif
-
-    if (density == 0) {
-        // nothing to do here. set everything to zero and leave
-        if (config.set_sparse_zero) {
-            set_out_zero<scalar_t, BLOCK_SIZE, n_pixels_out, pixelsPerBlockX, OUT_CHANNELS_PER_BLOCK, FULL_DEPTH, ENABLE_DILATION>(
-                batch_out, bias, tile_start_z, tile_start_out_y, tile_start_out_x, dim, config
-            );
-        }
-        return;
-    }
-
-    // const bool requires_boundary_checks = SUB_TILE_SPARSITY || (tile_start_in_x <= 0 || tile_start_in_y <= 0 || tile_start_in_x + pixelsPerBlockX * STRIDE * DILATION + 2 >= dim.in.w || tile_start_in_y + pixelsPerBlockY * STRIDE * DILATION + 2 >= dim.in.h); 
-    const bool requires_boundary_checks = true; 
-
-    for (int out_c = tile_start_z + threadIdx.x; out_c < dim.out.c && (FULL_DEPTH || out_c < tile_start_z + OUT_CHANNELS_PER_BLOCK); out_c += BLOCK_SIZE) {
-        scalar_t t_out[n_pixels_out];
-        const scalar_t t_bias = bias == nullptr ? 0.0f : bias[out_c];
-        #pragma unroll
-        for (int i = 0; i < n_pixels_out; ++i) {
-            t_out[i] = t_bias;
-        }
-        
-        const scalar_t *in_c_filter = &filter[out_c];
-        scalar_t t_f[KERNEL_SIZE*KERNEL_SIZE];
-        #pragma unroll
-        for(int f_y = 0; f_y < KERNEL_SIZE; ++f_y) {
-            #pragma unroll
-            for(int f_x = 0; f_x < KERNEL_SIZE; ++f_x) { 
-                t_f[f_y*KERNEL_SIZE + f_x] = in_c_filter[((2*K_HALF-f_y) * KERNEL_SIZE + 2*K_HALF - f_x) * dim.out.c];
-            }
-        }
-        
-        if (requires_boundary_checks) {
-            #pragma unroll
-            for (int in_y = -K_HALF; in_y < w_in - K_HALF; ++in_y) {
-                #pragma unroll
-                for (int in_x = -K_HALF; in_x < w_in - K_HALF; ++in_x) {
-                    const bool valid = is_px_mask_set<w_in, n_in_px>(in_x+K_HALF, in_y+K_HALF, t_mask, s_mask); 
-                    
-                    if (valid) {
-                        const int in_y_im = (in_y+K_HALF) * DILATION_Y + tile_start_in_y;
-                        const int in_x_im = (in_x+K_HALF) * DILATION_X + tile_start_in_x;
-                        const scalar_t val = batch_in[(in_y_im * dim.in.w + in_x_im) * dim.in.c + out_c];
-
-                        const int min_f_y = -in_y;
-                        const int min_f_x = -in_x;
-                        const int max_f_y = w_in - in_y - KERNEL_SIZE;
-                        const int max_f_x = w_in - in_x - KERNEL_SIZE;                        
-                        const int stride_off_y = (((-in_y + K_HALF) % STRIDE) + STRIDE) % STRIDE;
-                        const int stride_off_x = (((-in_x + K_HALF) % STRIDE) + STRIDE) % STRIDE;
-                        #pragma unroll
-                        for (int f_y = Utils::constexpr_max(-K_HALF + stride_off_y, min_f_y); f_y <= Utils::constexpr_min(K_HALF, max_f_y); f_y += STRIDE) {
-                            #pragma unroll
-                            for (int f_x = Utils::constexpr_max(-K_HALF + stride_off_x, min_f_x); f_x <= Utils::constexpr_min(K_HALF, max_f_x); f_x += STRIDE) {
-                                t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)] += val * t_f[(f_y+K_HALF)*KERNEL_SIZE + f_x+K_HALF];
-                                // if (threadIdx.x == 0 && in_y+f_y == 2 && in_x+f_x == 0 && blockIdx.x == 0) {
-                                // if (threadIdx.x == 0 && in_x+f_x == 0 && blockIdx.x == 0) {
-                                //     printf("BID=%i out_y/s=%i out_x/s=%i out_y=%i out_x=%i in_y=%i in_x=%i f_y=%i f_x=%i min_f_y=%i max_f_y=%i min_f_x=%i max_f_x=%i, val=%f, t_out=%f\n",
-                                //         blockIdx.x, ((in_y+f_y)/STRIDE), ((in_x+f_x)/STRIDE),
-                                //         in_y+f_y, in_x+f_y, in_y, in_x, f_y, f_x,
-                                //         min_f_y, max_f_y, min_f_x, max_f_x, 
-                                //         val, t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)]
-                                //     );
-                                // }
-                                // if (threadIdx.x == 0) {
-                                //     printf("in_y=%i in_x=%i f_y=%i f_x=%i min_f_y=%i max_f_y=%i min_f_x=%i max_f_x=%i, out_y=%i out_x=%i\n",
-                                //         in_y, in_x, f_y, f_x, min_f_y, max_f_y, min_f_x, max_f_x, in_y+f_y, in_x+f_x
-                                //     );
-                                // }
-                                // t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)] += 1.0f;
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            #pragma unroll
-            for (int in_y = -K_HALF; in_y < w_in - K_HALF; ++in_y) {
-                #pragma unroll
-                for (int in_x = -K_HALF; in_x < w_in - K_HALF; ++in_x) {
-                    const int in_y_im = (in_y+K_HALF) * DILATION_Y + tile_start_in_y;
-                    const int in_x_im = (in_x+K_HALF) * DILATION_X + tile_start_in_x;
-                    const scalar_t val = batch_in[(in_y_im * dim.in.w + in_x_im) * dim.in.c + out_c];
-                    const int min_f_y = -in_y;
-                    const int min_f_x = -in_x;
-                    const int max_f_y = w_in - in_y - KERNEL_SIZE;
-                    const int max_f_x = w_in - in_x - KERNEL_SIZE;                      
-                    const int stride_off_y = (((-in_y + K_HALF) % STRIDE) + STRIDE) % STRIDE;
-                    const int stride_off_x = (((-in_x + K_HALF) % STRIDE) + STRIDE) % STRIDE;
-                    #pragma unroll
-                    for (int f_y = Utils::constexpr_max(-K_HALF + stride_off_y, min_f_y); f_y <= Utils::constexpr_min(K_HALF, max_f_y); f_y += STRIDE) {
-                        #pragma unroll
-                        for (int f_x = Utils::constexpr_max(-K_HALF + stride_off_x, min_f_x); f_x <= Utils::constexpr_min(K_HALF, max_f_x); f_x += STRIDE) {
-                            t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)] += val * t_f[(f_y+K_HALF)*KERNEL_SIZE + f_x+K_HALF];
-                        }
-                    }
-                }
-            }
-        }
-
-        #pragma unroll
-        for (int out_y = 0; out_y < pixelsPerBlockY; ++out_y) {
-            const int out_y_im = out_y * DILATION_Y + tile_start_out_y;
-            #pragma unroll
-            for (int out_x = 0; out_x < pixelsPerBlockX; ++out_x) {
-                const int out_x_im = out_x * DILATION_X + tile_start_out_x;
-                const bool valid = out_y_im < dim.out.h && out_x_im < dim.out.w;
-                if (valid) {
-                    batch_out[(out_y_im * dim.out.w + out_x_im) * dim.out.c + out_c] = t_out[out_y*pixelsPerBlockX + out_x];
-                }
-            }
-        }
-    }
-}
-
-
-
-
-template<typename scalar_t = float, int pixelsPerBlockX=3, int pixelsPerBlockY=3, int BLOCK_SIZE=256, int OUT_CHANNELS_PER_BLOCK=32, bool SUB_TILE_SPARSITY=false, bool FULL_DEPTH=false, int STRIDE=1, bool ENABLE_DILATION=false>
-__global__ void deltacnn_7x7_sp(
-    const scalar_t* input,
-    scalar_t* output,
-    const scalar_t* filter,
-    const scalar_t* bias,
-    const uint32_t* mask,
-    uint32_t* out_mask,
-    Dimensions dim,
-    ConvConfig config
-) {
-    const int DILATION_X = ENABLE_DILATION ? config.dilation[1] : 1;
-    const int DILATION_Y = ENABLE_DILATION ? config.dilation[0] : 1;
-
-    int tile_start_out_y, tile_start_out_x, tile_start_in_y, tile_start_in_x, tile_start_z, batch;
-    calc_tile_indices<pixelsPerBlockX, pixelsPerBlockY, OUT_CHANNELS_PER_BLOCK, STRIDE, FULL_DEPTH, ENABLE_DILATION>(tile_start_out_y, tile_start_out_x, tile_start_in_y, tile_start_in_x, tile_start_z, batch, config, dim);
-
-
-    scalar_t* batch_out = output + (batch * dim.out.h * dim.out.w * dim.out.c);
-    const scalar_t* batch_in = input + (batch * dim.in.h * dim.in.w * dim.in.c);
-    const uint32_t* batch_mask = mask == nullptr ? nullptr : mask + (batch * dim.in.h * dim.in.w);
-    
-    const int n_pixels_out = pixelsPerBlockX * pixelsPerBlockY;
-    const int KERNEL_SIZE = 7;
-    const int K_HALF = (KERNEL_SIZE-1) / 2;
-    const int w_in = pixelsPerBlockX + (pixelsPerBlockX-1) * (STRIDE-1) + 2 * K_HALF;
-    const int h_in = pixelsPerBlockY + (pixelsPerBlockY-1) * (STRIDE-1) + 2 * K_HALF;
-    const int n_in_px = w_in * h_in;
-    const int in_row_vals = dim.in.w * dim.in.c;
-
-    const int lane_idx = threadIdx.x % WARP_SIZE;
-    const int warp_idx = threadIdx.x / WARP_SIZE;
-    const int sub_warp_idx = lane_idx / 8;
-    const int sub_warp_lane_idx = lane_idx % 8;
-    const int n_warps = BLOCK_SIZE / WARP_SIZE;
-
-    __shared__ uint32_t s_mask[n_in_px];
-    __shared__ scalar_t s_in[n_in_px][WARP_SIZE];
     uint32_t density = 0;
     uint64_t t_mask = 0LLU;
 
@@ -1055,6 +691,143 @@ __global__ void deltacnn_7x7_sp(
         return;
     }
 
+    for (int out_c = tile_start_z + threadIdx.x; out_c < dim.out.c && (FULL_DEPTH || out_c < tile_start_z + OUT_CHANNELS_PER_BLOCK); out_c += BLOCK_SIZE) {
+        scalar_t t_out[n_pixels_out];
+        const scalar_t t_bias = bias == nullptr ? 0.0f : bias[out_c];
+        #pragma unroll
+        for (int i = 0; i < n_pixels_out; ++i) {
+            t_out[i] = t_bias;
+        }
+        
+        const scalar_t *in_c_filter = &filter[out_c];
+        scalar_t t_f[KERNEL_SIZE*KERNEL_SIZE];
+        #pragma unroll
+        for(int f_y = 0; f_y < KERNEL_SIZE; ++f_y) {
+            #pragma unroll
+            for(int f_x = 0; f_x < KERNEL_SIZE; ++f_x) { 
+                t_f[f_y*KERNEL_SIZE + f_x] = in_c_filter[((2*K_HALF-f_y) * KERNEL_SIZE + 2*K_HALF - f_x) * dim.out.c];
+            }
+        }
+        
+        #pragma unroll
+        for (int in_y = -K_HALF; in_y < w_in - K_HALF; ++in_y) {
+            #pragma unroll
+            for (int in_x = -K_HALF; in_x < w_in - K_HALF; ++in_x) {
+                const bool valid = is_px_mask_set<w_in, n_in_px>(in_x+K_HALF, in_y+K_HALF, t_mask, s_mask); 
+                
+                if (valid) {
+                    const int in_y_im = (in_y+K_HALF) * DILATION_Y + tile_start_in_y;
+                    const int in_x_im = (in_x+K_HALF) * DILATION_X + tile_start_in_x;
+                    const scalar_t val = batch_in[(in_y_im * dim.in.w + in_x_im) * dim.in.c + out_c];
+
+                    const int min_f_y = -in_y;
+                    const int min_f_x = -in_x;
+                    const int max_f_y = w_in - in_y - KERNEL_SIZE;
+                    const int max_f_x = w_in - in_x - KERNEL_SIZE;                        
+                    const int stride_off_y = (((-in_y + K_HALF) % STRIDE) + STRIDE) % STRIDE;
+                    const int stride_off_x = (((-in_x + K_HALF) % STRIDE) + STRIDE) % STRIDE;
+                    #pragma unroll
+                    for (int f_y = Utils::constexpr_max(-K_HALF + stride_off_y, min_f_y); f_y <= Utils::constexpr_min(K_HALF, max_f_y); f_y += STRIDE) {
+                        #pragma unroll
+                        for (int f_x = Utils::constexpr_max(-K_HALF + stride_off_x, min_f_x); f_x <= Utils::constexpr_min(K_HALF, max_f_x); f_x += STRIDE) {
+                            t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)] += val * t_f[(f_y+K_HALF)*KERNEL_SIZE + f_x+K_HALF];
+                        }
+                    }
+                }
+            }
+        }
+
+        #pragma unroll
+        for (int out_y = 0; out_y < pixelsPerBlockY; ++out_y) {
+            const int out_y_im = out_y * DILATION_Y + tile_start_out_y;
+            #pragma unroll
+            for (int out_x = 0; out_x < pixelsPerBlockX; ++out_x) {
+                const int out_x_im = out_x * DILATION_X + tile_start_out_x;
+                const bool valid = out_y_im < dim.out.h && out_x_im < dim.out.w;
+                if (valid) {
+                    batch_out[(out_y_im * dim.out.w + out_x_im) * dim.out.c + out_c] = t_out[out_y*pixelsPerBlockX + out_x];
+                }
+            }
+        }
+    }
+}
+
+
+
+
+template<typename scalar_t = float, int KERNEL_SIZE=3, int pixelsPerBlockX=3, int pixelsPerBlockY=3, int BLOCK_SIZE=256, int OUT_CHANNELS_PER_BLOCK=32, bool SUB_TILE_SPARSITY=false, bool FULL_DEPTH=false, int STRIDE=1, bool ENABLE_DILATION=false>
+__global__ void deltacnn_standard_conv_sp(
+    const scalar_t* input,
+    scalar_t* output,
+    const scalar_t* filter,
+    const scalar_t* bias,
+    const uint32_t* mask,
+    uint32_t* out_mask,
+    Dimensions dim,
+    ConvConfig config
+) {
+    const int DILATION_X = ENABLE_DILATION ? config.dilation[1] : 1;
+    const int DILATION_Y = ENABLE_DILATION ? config.dilation[0] : 1;
+
+    int tile_start_out_y, tile_start_out_x, tile_start_in_y, tile_start_in_x, tile_start_z, batch;
+    calc_tile_indices<pixelsPerBlockX, pixelsPerBlockY, OUT_CHANNELS_PER_BLOCK, STRIDE, FULL_DEPTH, ENABLE_DILATION>(tile_start_out_y, tile_start_out_x, tile_start_in_y, tile_start_in_x, tile_start_z, batch, config, dim);
+
+
+    scalar_t* batch_out = output + (batch * dim.out.h * dim.out.w * dim.out.c);
+    const scalar_t* batch_in = input + (batch * dim.in.h * dim.in.w * dim.in.c);
+    const uint32_t* batch_mask = mask == nullptr ? nullptr : mask + (batch * dim.in.h * dim.in.w);
+    
+    const int n_pixels_out = pixelsPerBlockX * pixelsPerBlockY;
+    const int K_HALF = (KERNEL_SIZE-1) / 2;
+    const int w_in = pixelsPerBlockX + (pixelsPerBlockX-1) * (STRIDE-1) + 2 * K_HALF;
+    const int h_in = pixelsPerBlockY + (pixelsPerBlockY-1) * (STRIDE-1) + 2 * K_HALF;
+    const int n_in_px = w_in * h_in;
+    const int in_row_vals = dim.in.w * dim.in.c;
+
+    const int lane_idx = threadIdx.x % WARP_SIZE;
+    const int warp_idx = threadIdx.x / WARP_SIZE;
+    const int sub_warp_idx = lane_idx / 8;
+    const int sub_warp_lane_idx = lane_idx % 8;
+    const int n_warps = BLOCK_SIZE / WARP_SIZE;
+
+    __shared__ scalar_t s_in[n_in_px][WARP_SIZE];
+    __shared__ uint32_t s_mask[n_in_px];
+    uint32_t density = 0;
+    uint64_t t_mask = 0LLU;
+
+#ifdef ENABLE_METRICS
+    if (tile_start_z == 0 && threadIdx.x == 0) {
+        if (DCMetrics::track_filter_reads) {
+            atomicAdd(&d_metrics->n_vals_read_dense, uint64_t(n_in_px * dim.in.c) + KERNEL_SIZE*KERNEL_SIZE*dim.out.c*dim.in.c/config.groups);
+        } else {
+            atomicAdd(&d_metrics->n_vals_read_dense, uint64_t(n_in_px * dim.in.c)); 
+        }
+        atomicAdd(&d_metrics->n_vals_written_dense, uint64_t(n_pixels_out * dim.out.c)); 
+    }
+#endif
+
+    load_mask<BLOCK_SIZE, n_in_px, w_in, ENABLE_DILATION, KERNEL_SIZE, STRIDE>(tile_start_in_y, tile_start_in_x, lane_idx, batch_mask, &s_mask[0], t_mask, density, dim, config);
+
+    if (out_mask != nullptr && tile_start_z == 0) {
+        write_mask<BLOCK_SIZE, pixelsPerBlockX, n_pixels_out, w_in, n_in_px, STRIDE, ENABLE_DILATION, KERNEL_SIZE>(out_mask, batch, t_mask, &s_mask[0], density, tile_start_out_y, tile_start_out_x, dim, config);
+    }
+#ifdef ENABLE_METRICS
+    else if (tile_start_z == 0 && threadIdx.x == 0) {
+        atomicAdd(&d_metrics->n_vals_written, uint64_t(n_pixels_out * dim.out.c)); 
+    }
+#endif
+
+    if (density == 0) {
+        // nothing to do here. set everything to zero and leave
+        if (config.set_sparse_zero) {
+            set_out_zero<scalar_t, BLOCK_SIZE, n_pixels_out, pixelsPerBlockX, OUT_CHANNELS_PER_BLOCK, FULL_DEPTH, ENABLE_DILATION>(
+                batch_out, bias, tile_start_z, tile_start_out_y, tile_start_out_x, dim, config
+            );
+        }
+        return;
+    }
+
+    // TODO add sparse mode
     for (int out_c_off = tile_start_z; out_c_off < dim.out.c && (FULL_DEPTH || out_c_off < tile_start_z + OUT_CHANNELS_PER_BLOCK); out_c_off += BLOCK_SIZE) {
         const int out_c = out_c_off + threadIdx.x;
         scalar_t t_out[n_pixels_out];
@@ -1110,15 +883,6 @@ __global__ void deltacnn_7x7_sp(
                     const int in_x = px_idx % w_in;
                     const int in_c = in_c_off + lane_idx;
                     const bool valid = in_c < dim.in.c && is_px_mask_set<w_in, n_in_px>(in_x, in_y, t_mask, s_mask);
-
-                    // if (blockIdx.x+blockIdx.y+blockIdx.z == 0 && in_c == 0) {
-                    //     const int in_y_im = in_y * DILATION_Y + tile_start_in_y;
-                    //     const int in_x_im = in_x * DILATION_X + tile_start_in_x; 
-                    //     printf("in_y=%i in_x=%i in_y_im=%i in_x_im=%i idx=%i valid=%i val=%f, warp_idx=%i, px_idx=%i, tId=%i\n",
-                    //         in_y, in_x, in_y_im, in_x_im, in_y * w_in + in_x, (valid?1:0), (valid?batch_in[in_y_im * in_row_vals + in_x_im * dim.in.c + in_c]:0.0f),
-                    //         warp_idx, px_idx, threadIdx.x 
-                    //     );
-                    // }
 
                     if (valid) {
                         const int in_y_im = in_y * DILATION_Y + tile_start_in_y;
@@ -1189,345 +953,8 @@ __global__ void deltacnn_7x7_sp(
     }
 }
 
-
-template<typename scalar_t = half, int pixelsPerBlockX=3, int pixelsPerBlockY=3, int BLOCK_SIZE=256, int OUT_CHANNELS_PER_BLOCK=32, bool SUB_TILE_SPARSITY=false, bool FULL_DEPTH=false, int STRIDE=1, bool ENABLE_DILATION=false>
-__global__ void deltacnn_3x3_dw_hp(
-    const scalar_t* input,
-    scalar_t* output,
-    const scalar_t* filter,
-    const scalar_t* bias,
-    const uint32_t* mask,
-    uint32_t* out_mask,
-    Dimensions dim,
-    ConvConfig config
-) {
-    const int DILATION_X = ENABLE_DILATION ? config.dilation[1] : 1;
-    const int DILATION_Y = ENABLE_DILATION ? config.dilation[0] : 1;
-
-    const int n_pixels_out = pixelsPerBlockX * pixelsPerBlockY;
-
-    int tile_start_out_y, tile_start_out_x, tile_start_in_y, tile_start_in_x, tile_start_z, batch;
-    calc_tile_indices<pixelsPerBlockX, pixelsPerBlockY, OUT_CHANNELS_PER_BLOCK, STRIDE, FULL_DEPTH, ENABLE_DILATION>(
-        tile_start_out_y, tile_start_out_x, tile_start_in_y, tile_start_in_x, tile_start_z, batch, config, dim
-    );
-
-    scalar_t* batch_out = output + (batch * dim.out.h * dim.out.w * dim.out.c);
-    const scalar_t* batch_in = input + (batch * dim.in.h * dim.in.w * dim.in.c);
-    const uint32_t* batch_mask = mask == nullptr ? nullptr : mask + (batch * dim.in.h * dim.in.w);
-
-    const int w_in = pixelsPerBlockX + (pixelsPerBlockX-1) * (STRIDE-1) + 2;
-    const int h_in = pixelsPerBlockY + (pixelsPerBlockY-1) * (STRIDE-1) + 2;
-    const int n_in_px = w_in * h_in;
-
-    const int lane_idx = threadIdx.x % WARP_SIZE;
-    const int KERNEL_SIZE = 3;
-
-    __shared__ uint32_t s_mask[n_in_px];
-    uint64_t t_mask = 0LLU;
-    uint32_t density = 0;
-
-#ifdef ENABLE_METRICS
-    if (tile_start_z == 0 && threadIdx.x == 0) {
-        if (DCMetrics::track_filter_reads) {
-            atomicAdd(&d_metrics->n_vals_read_dense, uint64_t(n_in_px * dim.in.c) + KERNEL_SIZE*KERNEL_SIZE*dim.out.c*dim.in.c/config.groups);
-        } else {
-            atomicAdd(&d_metrics->n_vals_read_dense, uint64_t(n_in_px * dim.in.c)); 
-        }
-        atomicAdd(&d_metrics->n_vals_written_dense, uint64_t(n_pixels_out * dim.out.c)); 
-    }
-#endif
-
-    load_mask<BLOCK_SIZE, n_in_px, w_in, ENABLE_DILATION, KERNEL_SIZE, STRIDE>(tile_start_in_y, tile_start_in_x, lane_idx, batch_mask, &s_mask[0], t_mask, density, dim, config);
-
-
-    if (out_mask != nullptr && tile_start_z == 0) {
-        write_mask<BLOCK_SIZE, pixelsPerBlockX, n_pixels_out, w_in, n_in_px, STRIDE, ENABLE_DILATION>(out_mask, batch, t_mask, &s_mask[0], density, tile_start_out_y, tile_start_out_x, dim, config);
-    }
-#ifdef ENABLE_METRICS
-    else if (tile_start_z == 0 && threadIdx.x == 0) {
-        atomicAdd(&d_metrics->n_vals_written, uint64_t(n_pixels_out * dim.out.c)); 
-    }
-#endif
-
-    if ((n_in_px <= 64 && t_mask == 0LLU) || (n_in_px < 64 && density == 0)) {
-        // nothing to do here. set everything to zero and leave
-        if (config.set_sparse_zero) {
-            set_out_zero_hp<scalar_t, BLOCK_SIZE, n_pixels_out, pixelsPerBlockX, OUT_CHANNELS_PER_BLOCK, FULL_DEPTH, ENABLE_DILATION>(
-                batch_out, bias, tile_start_z, tile_start_out_y, tile_start_out_x, dim, config
-            );
-        }
-        return;
-    }
-    
-    const bool requires_boundary_checks = SUB_TILE_SPARSITY || (tile_start_in_x <= 0 || tile_start_in_y <= 0 || tile_start_in_x + pixelsPerBlockX * STRIDE * DILATION_X + 2 >= dim.in.w || tile_start_in_y + pixelsPerBlockY * STRIDE * DILATION_Y + 2 >= dim.in.h);
-
-    for (int out_c = tile_start_z + threadIdx.x * 2; out_c < dim.out.c && (FULL_DEPTH || out_c < tile_start_z + OUT_CHANNELS_PER_BLOCK); out_c += BLOCK_SIZE*2) {
-        half2 t_out[n_pixels_out];
-
-        half2 t_bias = __float2half2_rn(0.0f);
-        if (out_c + 1 < dim.out.c && bias != nullptr) {
-             t_bias = *reinterpret_cast<const half2*>(&bias[out_c]);
-        } else if (bias != nullptr) {
-             t_bias = __halves2half2(bias[out_c], __float2half(0.0f));
-        }
-        #pragma unroll
-        for (int i = 0; i < n_pixels_out; ++i) {
-            t_out[i] = t_bias;
-        }
-        
-        const scalar_t *in_c_filter = &filter[out_c];
-        half2 t_f[9];
-        if (dim.out.c % 2 == 0) {
-            #pragma unroll
-            for(int f_y = 0; f_y < 3; ++f_y) {
-                #pragma unroll
-                for(int f_x = 0; f_x < 3; ++f_x) { 
-                    t_f[f_y*3 + f_x] = *reinterpret_cast<const half2*>(&in_c_filter[((2-f_y) * 3 + 2 - f_x) * dim.out.c]);
-                }
-            }
-        } 
-        else {
-            if (out_c + 1 < dim.out.c) {
-                #pragma unroll
-                for(int f_y = 0; f_y < 3; ++f_y) {
-                    #pragma unroll
-                    for(int f_x = 0; f_x < 3; ++f_x) { 
-                        t_f[f_y*3 + f_x] = __halves2half2(in_c_filter[((2-f_y) * 3 + 2 - f_x) * dim.out.c], in_c_filter[((2-f_y) * 3 + 2 - f_x) * dim.out.c + 1]);
-                    }
-                }
-            } else {
-                #pragma unroll
-                for(int f_y = 0; f_y < 3; ++f_y) {
-                    #pragma unroll
-                    for(int f_x = 0; f_x < 3; ++f_x) { 
-                        t_f[f_y*3 + f_x] = __halves2half2(in_c_filter[((2-f_y) * 3 + 2 - f_x) * dim.out.c], __float2half(0.0f));
-                    }
-                }
-            }
-        }
-        
-        if (dim.out.c % 2 == 0) {
-            if (requires_boundary_checks) {
-                #pragma unroll
-                for (int in_y = -1; in_y < w_in - 1; ++in_y) {
-                    #pragma unroll
-                    for (int in_x = -1; in_x < w_in - 1; ++in_x) {
-                        const bool valid = is_px_mask_set<w_in, n_in_px>(in_x+1, in_y+1, t_mask, s_mask);
-                        if (valid) {
-                            const int in_y_im = (in_y+1) * DILATION_Y + tile_start_in_y;
-                            const int in_x_im = (in_x+1) * DILATION_X + tile_start_in_x;
-                            const half2 val = *reinterpret_cast<const half2*>(&batch_in[(in_y_im * dim.in.w + in_x_im) * dim.in.c + out_c]);
-                            const int min_f_y = -in_y;
-                            const int min_f_x = -in_x;  
-                            const int max_f_y = w_in - in_y - 3;
-                            const int max_f_x = w_in - in_x - 3;
-                            const int stride_off_y = (((1-in_y) % STRIDE) + STRIDE) % STRIDE;
-                            const int stride_off_x = (((1-in_x) % STRIDE) + STRIDE) % STRIDE;
-
-                            #pragma unroll
-                            for (int f_y = Utils::constexpr_max(-1 + stride_off_y, min_f_y); f_y <= Utils::constexpr_min(1, max_f_y); f_y += STRIDE) {
-                                #pragma unroll
-                                for (int f_x = Utils::constexpr_max(-1 + stride_off_x, min_f_x); f_x <= Utils::constexpr_min(1, max_f_x); f_x += STRIDE) {
-                                    t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)] = __hfma2(val, t_f[(f_y+1)*3 + f_x+1], t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)]);
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                #pragma unroll
-                for (int in_y = -1; in_y < w_in - 1; ++in_y) {
-                    #pragma unroll
-                    for (int in_x = -1; in_x < w_in - 1; ++in_x) {
-                        const int in_y_im = (in_y+1) * DILATION_Y + tile_start_in_y;
-                        const int in_x_im = (in_x+1) * DILATION_X + tile_start_in_x;
-                        const half2 val = *reinterpret_cast<const half2*>(&batch_in[(in_y_im * dim.in.w + in_x_im) * dim.in.c + out_c]);
-                        const int min_f_y = -in_y;
-                        const int min_f_x = -in_x;  
-                        const int max_f_y = w_in - in_y - 3;
-                        const int max_f_x = w_in - in_x - 3;
-                        const int stride_off_y = (((1-in_y) % STRIDE) + STRIDE) % STRIDE;
-                        const int stride_off_x = (((1-in_x) % STRIDE) + STRIDE) % STRIDE;
-
-                        #pragma unroll
-                        for (int f_y = Utils::constexpr_max(-1 + stride_off_y, min_f_y); f_y <= Utils::constexpr_min(1, max_f_y); f_y += STRIDE) {
-                            #pragma unroll
-                            for (int f_x = Utils::constexpr_max(-1 + stride_off_x, min_f_x); f_x <= Utils::constexpr_min(1, max_f_x); f_x += STRIDE) {
-                                t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)] = __hfma2(val, t_f[(f_y+1)*3 + f_x+1], t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)]);
-                            }
-                        }
-                    }
-                }
-            }
-            
-            #pragma unroll
-            for (int out_y = 0; out_y < pixelsPerBlockY; ++out_y) {
-                const int out_y_im = out_y * DILATION_Y + tile_start_out_y;
-                #pragma unroll
-                for (int out_x = 0; out_x < pixelsPerBlockX; ++out_x) {
-                    const int out_x_im = out_x * DILATION_X + tile_start_out_x;
-                    const bool valid = out_y_im < dim.out.h && out_x_im < dim.out.w;
-                    if (valid) {
-                        *reinterpret_cast<half2*>(&batch_out[(out_y_im * dim.out.w + out_x_im) * dim.out.c + out_c]) = t_out[out_y*pixelsPerBlockX + out_x];
-                    }
-                }
-            }
-
-        } else {
-            if (out_c + 1 < dim.out.c) {
-                if (requires_boundary_checks) {
-                    #pragma unroll
-                    for (int in_y = -1; in_y < w_in - 1; ++in_y) {
-                        #pragma unroll
-                        for (int in_x = -1; in_x < w_in - 1; ++in_x) {
-                            const bool valid = is_px_mask_set<w_in, n_in_px>(in_x+1, in_y+1, t_mask, s_mask);
-                            if (valid) {
-                                const int in_y_im = (in_y+1) * DILATION_Y + tile_start_in_y;
-                                const int in_x_im = (in_x+1) * DILATION_X + tile_start_in_x;
-                                const half2 val = __halves2half2(
-                                    batch_in[(in_y_im * dim.in.w + in_x_im) * dim.in.c + out_c],
-                                    batch_in[(in_y_im * dim.in.w + in_x_im) * dim.in.c + out_c + 1]
-                                );
-
-                                const int min_f_y = -in_y;
-                                const int min_f_x = -in_x;  
-                                const int max_f_y = w_in - in_y - 3;
-                                const int max_f_x = w_in - in_x - 3;
-                                const int stride_off_y = (((1-in_y) % STRIDE) + STRIDE) % STRIDE;
-                                const int stride_off_x = (((1-in_x) % STRIDE) + STRIDE) % STRIDE;
-
-                                #pragma unroll
-                                for (int f_y = Utils::constexpr_max(-1 + stride_off_y, min_f_y); f_y <= Utils::constexpr_min(1, max_f_y); f_y += STRIDE) {
-                                    #pragma unroll
-                                    for (int f_x = Utils::constexpr_max(-1 + stride_off_x, min_f_x); f_x <= Utils::constexpr_min(1, max_f_x); f_x += STRIDE) {
-                                        t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)] = __hfma2(val, t_f[(f_y+1)*3 + f_x+1], t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)]);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    #pragma unroll
-                    for (int in_y = -1; in_y < w_in - 1; ++in_y) {
-                        #pragma unroll
-                        for (int in_x = -1; in_x < w_in - 1; ++in_x) {
-                            const int in_y_im = (in_y+1) * DILATION_Y + tile_start_in_y;
-                            const int in_x_im = (in_x+1) * DILATION_X + tile_start_in_x;
-                            const half2 val = __halves2half2(
-                                batch_in[(in_y_im * dim.in.w + in_x_im) * dim.in.c + out_c],
-                                batch_in[(in_y_im * dim.in.w + in_x_im) * dim.in.c + out_c + 1]
-                            );
-                            const int min_f_y = -in_y;
-                            const int min_f_x = -in_x;  
-                            const int max_f_y = w_in - in_y - 3;
-                            const int max_f_x = w_in - in_x - 3;
-                            const int stride_off_y = (((1-in_y) % STRIDE) + STRIDE) % STRIDE;
-                            const int stride_off_x = (((1-in_x) % STRIDE) + STRIDE) % STRIDE;
-
-                            #pragma unroll
-                            for (int f_y = Utils::constexpr_max(-1 + stride_off_y, min_f_y); f_y <= Utils::constexpr_min(1, max_f_y); f_y += STRIDE) {
-                                #pragma unroll
-                                for (int f_x = Utils::constexpr_max(-1 + stride_off_x, min_f_x); f_x <= Utils::constexpr_min(1, max_f_x); f_x += STRIDE) {
-                                    t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)] = __hfma2(val, t_f[(f_y+1)*3 + f_x+1], t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)]);
-                                }
-                            }
-                        }
-                    }
-                }
-                #pragma unroll
-                for (int out_y = 0; out_y < pixelsPerBlockY; ++out_y) {
-                    const int out_y_im = out_y * DILATION_Y + tile_start_out_y;
-                    #pragma unroll
-                    for (int out_x = 0; out_x < pixelsPerBlockX; ++out_x) {
-                        const int out_x_im = out_x * DILATION_X + tile_start_out_x;
-                        const bool valid = out_y_im < dim.out.h && out_x_im < dim.out.w;
-                        if (valid) {
-                            batch_out[(out_y_im * dim.out.w + out_x_im) * dim.out.c + out_c] = __low2half(t_out[out_y*pixelsPerBlockX + out_x]);
-                            batch_out[(out_y_im * dim.out.w + out_x_im) * dim.out.c + out_c + 1] = __high2half(t_out[out_y*pixelsPerBlockX + out_x]);
-                        }
-                    }
-                }
-            } else {
-                if (requires_boundary_checks) {
-                    #pragma unroll
-                    for (int in_y = -1; in_y < w_in - 1; ++in_y) {
-                        #pragma unroll
-                        for (int in_x = -1; in_x < w_in - 1; ++in_x) {
-                            const bool valid = is_px_mask_set<w_in, n_in_px>(in_x+1, in_y+1, t_mask, s_mask);
-                            if (valid) {
-                                const int in_y_im = (in_y+1) * DILATION_Y + tile_start_in_y;
-                                const int in_x_im = (in_x+1) * DILATION_X + tile_start_in_x;
-                                const half2 val = __halves2half2(
-                                    batch_in[(in_y_im * dim.in.w + in_x_im) * dim.in.c + out_c],
-                                    __float2half(0.0f)
-                                );
-                                const int min_f_y = -in_y;
-                                const int min_f_x = -in_x;  
-                                const int max_f_y = w_in - in_y - 3;
-                                const int max_f_x = w_in - in_x - 3;
-                                const int stride_off_y = (((1-in_y) % STRIDE) + STRIDE) % STRIDE;
-                                const int stride_off_x = (((1-in_x) % STRIDE) + STRIDE) % STRIDE;
-
-                                #pragma unroll
-                                for (int f_y = Utils::constexpr_max(-1 + stride_off_y, min_f_y); f_y <= Utils::constexpr_min(1, max_f_y); f_y += STRIDE) {
-                                    #pragma unroll
-                                    for (int f_x = Utils::constexpr_max(-1 + stride_off_x, min_f_x); f_x <= Utils::constexpr_min(1, max_f_x); f_x += STRIDE) {
-                                        t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)] = __hfma2(val, t_f[(f_y+1)*3 + f_x+1], t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)]);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    #pragma unroll
-                    for (int in_y = -1; in_y < w_in - 1; ++in_y) {
-                        #pragma unroll
-                        for (int in_x = -1; in_x < w_in - 1; ++in_x) {
-                            const int in_y_im = (in_y+1) * DILATION_Y + tile_start_in_y;
-                            const int in_x_im = (in_x+1) * DILATION_X + tile_start_in_x;
-                            const half2 val = __halves2half2(
-                                batch_in[(in_y_im * dim.in.w + in_x_im) * dim.in.c + out_c],
-                                __float2half(0.0f)
-                            );
-                            const int min_f_y = -in_y;
-                            const int min_f_x = -in_x;  
-                            const int max_f_y = w_in - in_y - 3;
-                            const int max_f_x = w_in - in_x - 3;
-                            const int stride_off_y = (((1-in_y) % STRIDE) + STRIDE) % STRIDE;
-                            const int stride_off_x = (((1-in_x) % STRIDE) + STRIDE) % STRIDE;
-
-                            #pragma unroll
-                            for (int f_y = Utils::constexpr_max(-1 + stride_off_y, min_f_y); f_y <= Utils::constexpr_min(1, max_f_y); f_y += STRIDE) {
-                                #pragma unroll
-                                for (int f_x = Utils::constexpr_max(-1 + stride_off_x, min_f_x); f_x <= Utils::constexpr_min(1, max_f_x); f_x += STRIDE) {
-                                    t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)] = __hfma2(val, t_f[(f_y+1)*3 + f_x+1], t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)]);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                #pragma unroll
-                for (int out_y = 0; out_y < pixelsPerBlockY; ++out_y) {
-                    const int out_y_im = out_y * DILATION_X + tile_start_out_y;
-                    #pragma unroll
-                    for (int out_x = 0; out_x < pixelsPerBlockX; ++out_x) {
-                        const int out_x_im = out_x * DILATION_X + tile_start_out_x;
-                        const bool valid = out_y_im < dim.out.h && out_x_im < dim.out.w;
-                        if (valid) {
-                            batch_out[(out_y_im * dim.out.w + out_x_im) * dim.out.c + out_c] = __low2half(t_out[out_y*pixelsPerBlockX + out_x]);
-                        }
-                    }
-                }
-
-            }
-        }
-    }
-}
-
-
-template<typename scalar_t = half, int pixelsPerBlockX=3, int pixelsPerBlockY=3, int BLOCK_SIZE=256, int OUT_CHANNELS_PER_BLOCK=32, bool SUB_TILE_SPARSITY=false, bool FULL_DEPTH=false, int STRIDE=1, bool ENABLE_DILATION=false>
-__global__ void deltacnn_5x5_dw_hp(
+template<typename scalar_t = half, int KERNEL_SIZE=3, int pixelsPerBlockX=3, int pixelsPerBlockY=3, int BLOCK_SIZE=256, int OUT_CHANNELS_PER_BLOCK=32, bool SUB_TILE_SPARSITY=false, bool FULL_DEPTH=false, int STRIDE=1, bool ENABLE_DILATION=false>
+__global__ void deltacnn_dw_conv_hp(
     const scalar_t* input,
     scalar_t* output,
     const scalar_t* filter,
@@ -1549,7 +976,6 @@ __global__ void deltacnn_5x5_dw_hp(
     const uint32_t* batch_mask = mask == nullptr ? nullptr : mask + (batch * dim.in.h * dim.in.w);
     
     const int n_pixels_out = pixelsPerBlockX * pixelsPerBlockY;
-    const int KERNEL_SIZE = 5;
     const int K_HALF = (KERNEL_SIZE-1) / 2;
     const int w_in = pixelsPerBlockX + (pixelsPerBlockX-1) * (STRIDE-1) + 2 * K_HALF;
     const int h_in = pixelsPerBlockY + (pixelsPerBlockY-1) * (STRIDE-1) + 2 * K_HALF;
@@ -1571,10 +997,10 @@ __global__ void deltacnn_5x5_dw_hp(
     }
 #endif
 
-    load_mask<BLOCK_SIZE, n_in_px, w_in, ENABLE_DILATION>(tile_start_in_y, tile_start_in_x, lane_idx, batch_mask, &s_mask[0], t_mask, density, dim, config);
+    load_mask<BLOCK_SIZE, n_in_px, w_in, ENABLE_DILATION, KERNEL_SIZE, STRIDE>(tile_start_in_y, tile_start_in_x, lane_idx, batch_mask, &s_mask[0], t_mask, density, dim, config);
 
     if (out_mask != nullptr && tile_start_z == 0) {
-        write_mask<BLOCK_SIZE, pixelsPerBlockX, n_pixels_out, w_in, n_in_px, STRIDE, ENABLE_DILATION, 5>(out_mask, batch, t_mask, &s_mask[0], density, tile_start_out_y, tile_start_out_x, dim, config);
+        write_mask<BLOCK_SIZE, pixelsPerBlockX, n_pixels_out, w_in, n_in_px, STRIDE, ENABLE_DILATION, KERNEL_SIZE>(out_mask, batch, t_mask, &s_mask[0], density, tile_start_out_y, tile_start_out_x, dim, config);
     }
 #ifdef ENABLE_METRICS
     else if (tile_start_z == 0 && threadIdx.x == 0) {
@@ -1591,9 +1017,6 @@ __global__ void deltacnn_5x5_dw_hp(
         }
         return;
     }
-
-    
-    const bool requires_boundary_checks = SUB_TILE_SPARSITY || (tile_start_in_x <= 0 || tile_start_in_y <= 0 || tile_start_in_x + pixelsPerBlockX * STRIDE * DILATION_X + 2 >= dim.in.w || tile_start_in_y + pixelsPerBlockY * STRIDE * DILATION_Y + 2 >= dim.in.h);
 
     for (int out_c = tile_start_z + threadIdx.x * 2; out_c < dim.out.c && (FULL_DEPTH || out_c < tile_start_z + OUT_CHANNELS_PER_BLOCK); out_c += BLOCK_SIZE*2) {
         half2 t_out[n_pixels_out];
@@ -1641,38 +1064,12 @@ __global__ void deltacnn_5x5_dw_hp(
         }
         
         if (dim.out.c % 2 == 0) {
-            if (requires_boundary_checks) {
+            #pragma unroll
+            for (int in_y = -K_HALF; in_y < h_in - K_HALF; ++in_y) {
                 #pragma unroll
-                for (int in_y = -K_HALF; in_y < h_in - K_HALF; ++in_y) {
-                    #pragma unroll
-                    for (int in_x = -K_HALF; in_x < w_in - K_HALF; ++in_x) {
-                        const bool valid = is_px_mask_set<w_in, n_in_px>(in_x+K_HALF, in_y+K_HALF, t_mask, s_mask);
-                        if (valid) {
-                            const int in_y_im = (in_y+K_HALF) * DILATION_Y + tile_start_in_y;
-                            const int in_x_im = (in_x+K_HALF) * DILATION_X + tile_start_in_x;
-                            const half2 val = *reinterpret_cast<const half2*>(&batch_in[(in_y_im * dim.in.w + in_x_im) * dim.in.c + out_c]);
-                            const int min_f_y = -in_y;
-                            const int min_f_x = -in_x;  
-                            const int max_f_y = h_in - in_y - KERNEL_SIZE;
-                            const int max_f_x = w_in - in_x - KERNEL_SIZE;                        
-                            const int stride_off_y = (((-in_y + K_HALF) % STRIDE) + STRIDE) % STRIDE;
-                            const int stride_off_x = (((-in_x + K_HALF) % STRIDE) + STRIDE) % STRIDE;
-
-                            #pragma unroll
-                            for (int f_y = Utils::constexpr_max(-K_HALF + stride_off_y, min_f_y); f_y <= Utils::constexpr_min(K_HALF, max_f_y); f_y += STRIDE) {
-                                #pragma unroll
-                                for (int f_x = Utils::constexpr_max(-K_HALF + stride_off_x, min_f_x); f_x <= Utils::constexpr_min(K_HALF, max_f_x); f_x += STRIDE) {
-                                    t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)] = __hfma2(val, t_f[(f_y+K_HALF)*KERNEL_SIZE + f_x+K_HALF], t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)]);
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                #pragma unroll
-                for (int in_y = -K_HALF; in_y < h_in - K_HALF; ++in_y) {
-                    #pragma unroll
-                    for (int in_x = -K_HALF; in_x < w_in - K_HALF; ++in_x) {
+                for (int in_x = -K_HALF; in_x < w_in - K_HALF; ++in_x) {
+                    const bool valid = is_px_mask_set<w_in, n_in_px>(in_x+K_HALF, in_y+K_HALF, t_mask, s_mask);
+                    if (valid) {
                         const int in_y_im = (in_y+K_HALF) * DILATION_Y + tile_start_in_y;
                         const int in_x_im = (in_x+K_HALF) * DILATION_X + tile_start_in_x;
                         const half2 val = *reinterpret_cast<const half2*>(&batch_in[(in_y_im * dim.in.w + in_x_im) * dim.in.c + out_c]);
@@ -1693,49 +1090,49 @@ __global__ void deltacnn_5x5_dw_hp(
                     }
                 }
             }
-
         } else {
             if (out_c + 1 < dim.out.c) {
-                if (requires_boundary_checks) {
+                #pragma unroll
+                for (int in_y = -K_HALF; in_y < h_in - K_HALF; ++in_y) {
                     #pragma unroll
-                    for (int in_y = -K_HALF; in_y < h_in - K_HALF; ++in_y) {
-                        #pragma unroll
-                        for (int in_x = -K_HALF; in_x < w_in - K_HALF; ++in_x) {
-                            const bool valid = is_px_mask_set<w_in, n_in_px>(in_x+K_HALF, in_y+K_HALF, t_mask, s_mask);
-                            if (valid) {
-                                const int in_y_im = (in_y+K_HALF) * DILATION_Y + tile_start_in_y;
-                                const int in_x_im = (in_x+K_HALF) * DILATION_X + tile_start_in_x;
-                                const half2 val = __halves2half2(
-                                    batch_in[(in_y_im * dim.in.w + in_x_im) * dim.in.c + out_c],
-                                    batch_in[(in_y_im * dim.in.w + in_x_im) * dim.in.c + out_c + 1]
-                                );
-                                const int min_f_y = -in_y;
-                                const int min_f_x = -in_x;  
-                                const int max_f_y = h_in - in_y - KERNEL_SIZE;
-                                const int max_f_x = w_in - in_x - KERNEL_SIZE;                        
-                                const int stride_off_y = (((-in_y + K_HALF) % STRIDE) + STRIDE) % STRIDE;
-                                const int stride_off_x = (((-in_x + K_HALF) % STRIDE) + STRIDE) % STRIDE;
-
-                                #pragma unroll
-                                for (int f_y = Utils::constexpr_max(-K_HALF + stride_off_y, min_f_y); f_y <= Utils::constexpr_min(K_HALF, max_f_y); f_y += STRIDE) {
-                                    #pragma unroll
-                                    for (int f_x = Utils::constexpr_max(-K_HALF + stride_off_x, min_f_x); f_x <= Utils::constexpr_min(K_HALF, max_f_x); f_x += STRIDE) {
-                                        t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)] = __hfma2(val, t_f[(f_y+K_HALF)*KERNEL_SIZE + f_x+K_HALF], t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)]);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    #pragma unroll
-                    for (int in_y = -K_HALF; in_y < h_in - K_HALF; ++in_y) {
-                        #pragma unroll
-                        for (int in_x = -K_HALF; in_x < w_in - K_HALF; ++in_x) {
+                    for (int in_x = -K_HALF; in_x < w_in - K_HALF; ++in_x) {
+                        const bool valid = is_px_mask_set<w_in, n_in_px>(in_x+K_HALF, in_y+K_HALF, t_mask, s_mask);
+                        if (valid) {
                             const int in_y_im = (in_y+K_HALF) * DILATION_Y + tile_start_in_y;
                             const int in_x_im = (in_x+K_HALF) * DILATION_X + tile_start_in_x;
                             const half2 val = __halves2half2(
                                 batch_in[(in_y_im * dim.in.w + in_x_im) * dim.in.c + out_c],
                                 batch_in[(in_y_im * dim.in.w + in_x_im) * dim.in.c + out_c + 1]
+                            );
+                            const int min_f_y = -in_y;
+                            const int min_f_x = -in_x;  
+                            const int max_f_y = h_in - in_y - KERNEL_SIZE;
+                            const int max_f_x = w_in - in_x - KERNEL_SIZE;                        
+                            const int stride_off_y = (((-in_y + K_HALF) % STRIDE) + STRIDE) % STRIDE;
+                            const int stride_off_x = (((-in_x + K_HALF) % STRIDE) + STRIDE) % STRIDE;
+
+                            #pragma unroll
+                            for (int f_y = Utils::constexpr_max(-K_HALF + stride_off_y, min_f_y); f_y <= Utils::constexpr_min(K_HALF, max_f_y); f_y += STRIDE) {
+                                #pragma unroll
+                                for (int f_x = Utils::constexpr_max(-K_HALF + stride_off_x, min_f_x); f_x <= Utils::constexpr_min(K_HALF, max_f_x); f_x += STRIDE) {
+                                    t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)] = __hfma2(val, t_f[(f_y+K_HALF)*KERNEL_SIZE + f_x+K_HALF], t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)]);
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                #pragma unroll
+                for (int in_y = -K_HALF; in_y < h_in - K_HALF; ++in_y) {
+                    #pragma unroll
+                    for (int in_x = -K_HALF; in_x < w_in - K_HALF; ++in_x) {
+                        const bool valid = is_px_mask_set<w_in, n_in_px>(in_x+K_HALF, in_y+K_HALF, t_mask, s_mask);
+                        if (valid) {
+                            const int in_y_im = (in_y+K_HALF) * DILATION_Y + tile_start_in_y;
+                            const int in_x_im = (in_x+K_HALF) * DILATION_X + tile_start_in_x;
+                            const half2 val = __halves2half2(
+                                batch_in[(in_y_im * dim.in.w + in_x_im) * dim.in.c + out_c],
+                                __float2half(0.0f)
                             );
                             
                             const int min_f_y = -in_y;
@@ -1755,67 +1152,6 @@ __global__ void deltacnn_5x5_dw_hp(
                         }
                     }
                 }
-            } else {
-                if (requires_boundary_checks) {
-                    #pragma unroll
-                    for (int in_y = -K_HALF; in_y < h_in - K_HALF; ++in_y) {
-                        #pragma unroll
-                        for (int in_x = -K_HALF; in_x < w_in - K_HALF; ++in_x) {
-                            const bool valid = is_px_mask_set<w_in, n_in_px>(in_x+K_HALF, in_y+K_HALF, t_mask, s_mask);
-                            if (valid) {
-                                const int in_y_im = (in_y+K_HALF) * DILATION_Y + tile_start_in_y;
-                                const int in_x_im = (in_x+K_HALF) * DILATION_X + tile_start_in_x;
-                                const half2 val = __halves2half2(
-                                    batch_in[(in_y_im * dim.in.w + in_x_im) * dim.in.c + out_c],
-                                    __float2half(0.0f)
-                                );
-                                
-                                const int min_f_y = -in_y;
-                                const int min_f_x = -in_x;  
-                                const int max_f_y = h_in - in_y - KERNEL_SIZE;
-                                const int max_f_x = w_in - in_x - KERNEL_SIZE;                        
-                                const int stride_off_y = (((-in_y + K_HALF) % STRIDE) + STRIDE) % STRIDE;
-                                const int stride_off_x = (((-in_x + K_HALF) % STRIDE) + STRIDE) % STRIDE;
-
-                                #pragma unroll
-                                for (int f_y = Utils::constexpr_max(-K_HALF + stride_off_y, min_f_y); f_y <= Utils::constexpr_min(K_HALF, max_f_y); f_y += STRIDE) {
-                                    #pragma unroll
-                                    for (int f_x = Utils::constexpr_max(-K_HALF + stride_off_x, min_f_x); f_x <= Utils::constexpr_min(K_HALF, max_f_x); f_x += STRIDE) {
-                                        t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)] = __hfma2(val, t_f[(f_y+K_HALF)*KERNEL_SIZE + f_x+K_HALF], t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)]);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    #pragma unroll
-                    for (int in_y = -K_HALF; in_y < h_in - K_HALF; ++in_y) {
-                        #pragma unroll
-                        for (int in_x = -K_HALF; in_x < w_in - K_HALF; ++in_x) {
-                            const int in_y_im = (in_y+K_HALF) * DILATION_Y + tile_start_in_y;
-                            const int in_x_im = (in_x+K_HALF) * DILATION_X + tile_start_in_x;
-                            const half2 val = __halves2half2(
-                                batch_in[(in_y_im * dim.in.w + in_x_im) * dim.in.c + out_c],
-                                __float2half(0.0f)
-                            );
-
-                            const int min_f_y = -in_y;
-                            const int min_f_x = -in_x;  
-                            const int max_f_y = h_in - in_y - KERNEL_SIZE;
-                            const int max_f_x = w_in - in_x - KERNEL_SIZE;                        
-                            const int stride_off_y = (((-in_y + K_HALF) % STRIDE) + STRIDE) % STRIDE;
-                            const int stride_off_x = (((-in_x + K_HALF) % STRIDE) + STRIDE) % STRIDE;
-                            #pragma unroll
-                            for (int f_y = Utils::constexpr_max(-K_HALF + stride_off_y, min_f_y); f_y <= Utils::constexpr_min(K_HALF, max_f_y); f_y += STRIDE) {
-                                #pragma unroll
-                                for (int f_x = Utils::constexpr_max(-K_HALF + stride_off_x, min_f_x); f_x <= Utils::constexpr_min(K_HALF, max_f_x); f_x += STRIDE) {
-                                    t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)] = __hfma2(val, t_f[(f_y+K_HALF)*KERNEL_SIZE + f_x+K_HALF], t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)]);
-                                }
-                            }
-                        }
-                    }
-                }
-
             }
         }
 
@@ -1866,10 +1202,8 @@ __global__ void deltacnn_5x5_dw_hp(
 }
 
 
-
-
-template<typename scalar_t = half, int pixelsPerBlockX=3, int pixelsPerBlockY=3, int BLOCK_SIZE=256, int OUT_CHANNELS_PER_BLOCK=32, bool SUB_TILE_SPARSITY=false, bool FULL_DEPTH=false, int STRIDE=1, bool ENABLE_DILATION=false>
-__global__ void deltacnn_7x7_hp(
+template<typename scalar_t = half, int KERNEL_SIZE=3, int pixelsPerBlockX=3, int pixelsPerBlockY=3, int BLOCK_SIZE=256, int OUT_CHANNELS_PER_BLOCK=32, bool SUB_TILE_SPARSITY=false, bool FULL_DEPTH=false, int STRIDE=1, bool ENABLE_DILATION=false>
+__global__ void deltacnn_standard_conv_hp(
     const scalar_t* input,
     scalar_t* output,
     const scalar_t* filter,
@@ -1881,9 +1215,7 @@ __global__ void deltacnn_7x7_hp(
 ) {
     const int DILATION_X = ENABLE_DILATION ? config.dilation[1] : 1;
     const int DILATION_Y = ENABLE_DILATION ? config.dilation[0] : 1;
-    const int in_row_vals = dim.in.w * dim.in.c;
-    const int KERNEL_SIZE = 7;
-    const int K_HALF = (KERNEL_SIZE-1) / 2;
+    const int OUT_CHANNELS_PER_THREAD = 2;
 
     int tile_start_out_y, tile_start_out_x, tile_start_in_y, tile_start_in_x, tile_start_z, batch;
     calc_tile_indices<pixelsPerBlockX, pixelsPerBlockY, OUT_CHANNELS_PER_BLOCK, STRIDE, FULL_DEPTH, ENABLE_DILATION>(tile_start_out_y, tile_start_out_x, tile_start_in_y, tile_start_in_x, tile_start_z, batch, config, dim);
@@ -1894,9 +1226,12 @@ __global__ void deltacnn_7x7_hp(
     const uint32_t* batch_mask = mask == nullptr ? nullptr : mask + (batch * dim.in.h * dim.in.w);
     
     const int n_pixels_out = pixelsPerBlockX * pixelsPerBlockY;
+    const int K_HALF = (KERNEL_SIZE-1) / 2;
     const int w_in = pixelsPerBlockX + (pixelsPerBlockX-1) * (STRIDE-1) + 2 * K_HALF;
     const int h_in = pixelsPerBlockY + (pixelsPerBlockY-1) * (STRIDE-1) + 2 * K_HALF;
     const int n_in_px = w_in * h_in;
+    const int in_row_vals = dim.in.w * dim.in.c;
+
     const int lane_idx = threadIdx.x % WARP_SIZE;
     const int warp_idx = threadIdx.x / WARP_SIZE;
     const int n_warps = BLOCK_SIZE / WARP_SIZE;
@@ -1920,11 +1255,11 @@ __global__ void deltacnn_7x7_hp(
     }
 #endif
 
-    load_mask<BLOCK_SIZE, n_in_px, w_in, ENABLE_DILATION>(tile_start_in_y, tile_start_in_x, lane_idx, batch_mask, &s_mask[0], t_mask, density, dim, config);
+    load_mask<BLOCK_SIZE, n_in_px, w_in, ENABLE_DILATION, KERNEL_SIZE, STRIDE>(tile_start_in_y, tile_start_in_x, lane_idx, batch_mask, &s_mask[0], t_mask, density, dim, config);
     
 
     if (out_mask != nullptr && tile_start_z == 0) {
-        write_mask<BLOCK_SIZE, pixelsPerBlockX, n_pixels_out, w_in, n_in_px, STRIDE, ENABLE_DILATION, 5>(out_mask, batch, t_mask, &s_mask[0], density, tile_start_out_y, tile_start_out_x, dim, config);
+        write_mask<BLOCK_SIZE, pixelsPerBlockX, n_pixels_out, w_in, n_in_px, STRIDE, ENABLE_DILATION, KERNEL_SIZE>(out_mask, batch, t_mask, &s_mask[0], density, tile_start_out_y, tile_start_out_x, dim, config);
     }
 #ifdef ENABLE_METRICS
     else if (tile_start_z == 0 && threadIdx.x == 0) {
@@ -1973,7 +1308,7 @@ __global__ void deltacnn_7x7_hp(
             } else if (dim.in.c == 3) {
                 for (int val_idx = threadIdx.x; val_idx < n_in_px * 2; val_idx += BLOCK_SIZE) {
                     const int px_idx = val_idx / 2;
-                    const int in_c = (val_idx % 2) * 2;
+                    const int in_c = in_c_off + (val_idx % 2) * 2;
                     const int in_y = px_idx / w_in; 
                     const int in_y_im = in_y * DILATION_Y + tile_start_in_y;
                     const int in_x = px_idx % w_in;
@@ -1990,7 +1325,7 @@ __global__ void deltacnn_7x7_hp(
                     } else {
                         val = __half2half2(__float2half(0.0f));
                     }
-                    s_in[in_y * w_in + in_x][in_c/2] = val;
+                    s_in[in_y * w_in + in_x][(in_c-in_c_off)/2] = val;
                 }
             } else {
                 for (int px_idx = warp_idx; px_idx < n_in_px; px_idx += n_warps) {
@@ -2022,7 +1357,7 @@ __global__ void deltacnn_7x7_hp(
                 const half *in_c_filter1 = &filter[(in_c_off+in_c) * KERNEL_SIZE*KERNEL_SIZE * out_c_aligned + out_c];
                 #pragma unroll
                 for(int f_px_idx = 0; f_px_idx < KERNEL_SIZE*KERNEL_SIZE; ++f_px_idx) {
-                    t_f[(KERNEL_SIZE*KERNEL_SIZE)-f_px_idx] = *reinterpret_cast<const half2*>(&in_c_filter1[f_px_idx * out_c_aligned]);
+                    t_f[(KERNEL_SIZE*KERNEL_SIZE-1)-f_px_idx] = *reinterpret_cast<const half2*>(&in_c_filter1[f_px_idx * out_c_aligned]);
                 }
 
                 if (out_c < dim.out.c) {
@@ -2217,6 +1552,7 @@ deltacnn_3x3_hp(
     }
 
 
+    // TODO debug sparse kernel. disabled for now
     if (SUB_TILE_SPARSITY && density <= sparse_mode_max_elements && !ENABLE_DILATION && STRIDE == 1 && false) {
         // TODO implement dilated and strided sparse kernels
         int set_elements[sparse_mode_max_elements];
@@ -2289,101 +1625,102 @@ deltacnn_3x3_hp(
                     }
                 }
                 __syncthreads();
-                if (out_c < dim.out.c) {
-                    const int n_t_f = 4;
+                if (out_c >= dim.out.c)
+                    continue;
 
+                const int n_t_f = 4;
+
+                #pragma unroll 1
+                for (int kernel_y = -1; kernel_y <= 1; ++kernel_y) {
+                    bool inside_y = false;
+                    for (int element_idx = 0; element_idx < sparse_mode_max_elements; ++element_idx) {
+                        const int in_px_idx = set_elements[element_idx];
+                        if (in_px_idx < 0) {
+                            break;
+                        }
+                        const int in_y = (in_px_idx / w_in) - DILATION_Y;
+                        const int out_y = in_y + kernel_y * DILATION_Y;
+                        if (out_y >= 0 && out_y < dim.out.h) {
+                            inside_y = true;
+                            break;
+                        }
+                    }
+                    if (!inside_y) {
+                        continue;
+                    }
                     #pragma unroll 1
-                    for (int kernel_y = -1; kernel_y <= 1; ++kernel_y) {
-                        bool inside_y = false;
+                    for (int kernel_x = -1; kernel_x <= 1; ++kernel_x) {
+                        bool inside_x = false;
                         for (int element_idx = 0; element_idx < sparse_mode_max_elements; ++element_idx) {
                             const int in_px_idx = set_elements[element_idx];
                             if (in_px_idx < 0) {
                                 break;
                             }
-                            const int in_y = (in_px_idx / w_in) - DILATION_Y;
-                            const int out_y = in_y + kernel_y * DILATION_Y;
-                            if (out_y >= 0 && out_y < dim.out.h) {
-                                inside_y = true;
+                            int in_x = (in_px_idx % w_in) - DILATION_X;
+                            const int out_x = in_x + kernel_x * DILATION_X;
+                            if (out_x >= 0 && out_x < dim.out.w) {
+                                inside_x = true;
                                 break;
                             }
                         }
-                        if (!inside_y) {
+                        if (!inside_x) {
                             continue;
                         }
-                        #pragma unroll 1
-                        for (int kernel_x = -1; kernel_x <= 1; ++kernel_x) {
-                            bool inside_x = false;
-                            for (int element_idx = 0; element_idx < sparse_mode_max_elements; ++element_idx) {
-                                const int in_px_idx = set_elements[element_idx];
-                                if (in_px_idx < 0) {
-                                    break;
-                                }
-                                int in_x = (in_px_idx % w_in) - DILATION_X;
-                                const int out_x = in_x + kernel_x * DILATION_X;
-                                if (out_x >= 0 && out_x < dim.out.w) {
-                                    inside_x = true;
-                                    break;
-                                }
-                            }
-                            if (!inside_x) {
-                                continue;
-                            }
 
-                            for (int t_f_iter = 0; t_f_iter < WARP_SIZE / n_t_f && in_c_off + t_f_iter*n_t_f < in_c_aligned; ++t_f_iter) {
-                                const scalar_t *in_c_filter = &filter[((in_c_off + t_f_iter*n_t_f*2) * 9 + (1-kernel_y)*3 + (1-kernel_x)) * out_c_aligned + out_c];
-                                
-                                half2 t_f[n_t_f];
-                                for (int in_c_iter = 0; in_c_iter < 2; ++in_c_iter) {
-                                    #pragma unroll
-                                    for (int i_t_f = 0; i_t_f < n_t_f; ++i_t_f) {
-                                        if (i_t_f * 2 + t_f_iter * n_t_f * 2 < in_c_aligned) 
-                                        {
-                                            t_f[i_t_f] = *reinterpret_cast<const half2*>(&in_c_filter[((in_c_iter + i_t_f * 2) * 9) * out_c_aligned]);
-                                        }
+                        for (int t_f_iter = 0; t_f_iter < WARP_SIZE / n_t_f && in_c_off + t_f_iter*n_t_f < in_c_aligned; ++t_f_iter) {
+                            const scalar_t *in_c_filter = &filter[((in_c_off + t_f_iter*n_t_f*2) * 9 + (1-kernel_y)*3 + (1-kernel_x)) * out_c_aligned + out_c];
+                            
+                            half2 t_f[n_t_f];
+                            for (int in_c_iter = 0; in_c_iter < 2; ++in_c_iter) {
+                                #pragma unroll
+                                for (int i_t_f = 0; i_t_f < n_t_f; ++i_t_f) {
+                                    if (i_t_f * 2 + t_f_iter * n_t_f * 2 < in_c_aligned) 
+                                    {
+                                        t_f[i_t_f] = *reinterpret_cast<const half2*>(&in_c_filter[((in_c_iter + i_t_f * 2) * 9) * out_c_aligned]);
                                     }
+                                }
 
-                                    if (in_c_iter == 0) {
-                                        #pragma unroll
-                                        for (int element_idx = 0; element_idx < sparse_mode_max_elements; ++element_idx) {
-                                            const bool valid = set_elements[element_idx] >= 0;
-                                            if (valid) {
-                                                const int in_px_idx = set_elements[element_idx];
-                                                int in_y = (in_px_idx / w_in) - DILATION_Y;
-                                                int in_x = (in_px_idx % w_in) - DILATION_X;
-                                                const int out_y = in_y + kernel_y * DILATION_Y;
-                                                const int out_x = in_x + kernel_x * DILATION_X;
-                                                const bool inside = out_y >= 0 && out_y < pixelsPerBlockY && out_x >= 0 && out_x < pixelsPerBlockX; 
-                                                const half2* s_in_px = smem.sparse.s_in[element_idx];
-                                                if (inside) {
-                                                    half2 result = __float2half2_rn(0.0f);
-                                                    #pragma unroll
-                                                    for (int in_c_shared = 0; in_c_shared < n_t_f; ++in_c_shared) {
-                                                        result = __hfma2(s_in_px[in_c_shared + t_f_iter*n_t_f], t_f[in_c_shared], result);
-                                                    }
-                                                    smem.sparse.s_out[out_y * pixelsPerBlockX + out_x][threadIdx.x] = __hadd2(result, smem.sparse.s_out[out_y * pixelsPerBlockX + out_x][threadIdx.x]);
+                                if (in_c_iter == 0) {
+                                    #pragma unroll
+                                    for (int element_idx = 0; element_idx < sparse_mode_max_elements; ++element_idx) {
+                                        const bool valid = set_elements[element_idx] >= 0;
+                                        if (valid) {
+                                            const int in_px_idx = set_elements[element_idx];
+                                            int in_y = (in_px_idx / w_in) - DILATION_Y;
+                                            int in_x = (in_px_idx % w_in) - DILATION_X;
+                                            const int out_y = in_y + kernel_y * DILATION_Y;
+                                            const int out_x = in_x + kernel_x * DILATION_X;
+                                            const bool inside = out_y >= 0 && out_y < pixelsPerBlockY && out_x >= 0 && out_x < pixelsPerBlockX; 
+                                            const half2* s_in_px = smem.sparse.s_in[element_idx];
+                                            if (inside) {
+                                                half2 result = __float2half2_rn(0.0f);
+                                                #pragma unroll
+                                                for (int in_c_shared = 0; in_c_shared < n_t_f; ++in_c_shared) {
+                                                    result = __hfma2(s_in_px[in_c_shared + t_f_iter*n_t_f], t_f[in_c_shared], result);
                                                 }
+                                                smem.sparse.s_out[out_y * pixelsPerBlockX + out_x][threadIdx.x] = __hadd2(result, smem.sparse.s_out[out_y * pixelsPerBlockX + out_x][threadIdx.x]);
                                             }
                                         }
-                                    } else {
-                                        #pragma unroll
-                                        for (int element_idx = 0; element_idx < sparse_mode_max_elements; ++element_idx) {
-                                            const bool valid = set_elements[element_idx] >= 0;
-                                            if (valid) {
-                                                const int in_px_idx = set_elements[element_idx];
-                                                int in_y = (in_px_idx / w_in) - DILATION_Y;
-                                                int in_x = (in_px_idx % w_in) - DILATION_X;
-                                                const int out_y = in_y + kernel_y * DILATION_Y;
-                                                const int out_x = in_x + kernel_x * DILATION_X;
-                                                const bool inside = out_y >= 0 && out_y < pixelsPerBlockY && out_x >= 0 && out_x < pixelsPerBlockX; 
-                                                const half2* s_in_px = smem.sparse.s_in[element_idx];
-                                                if (inside) {
-                                                    half2 result = __float2half2_rn(0.0f);
-                                                    #pragma unroll
-                                                    for (int in_c_shared = 0; in_c_shared < n_t_f; ++in_c_shared) {
-                                                        result = __hfma2(__lowhigh2highlow(s_in_px[in_c_shared + t_f_iter*n_t_f]), t_f[in_c_shared], result);
-                                                    }
-                                                    smem.sparse.s_out[out_y * pixelsPerBlockX + out_x][threadIdx.x] = __hadd2(result, smem.sparse.s_out[out_y * pixelsPerBlockX + out_x][threadIdx.x]);
+                                    }
+                                } else {
+                                    #pragma unroll
+                                    for (int element_idx = 0; element_idx < sparse_mode_max_elements; ++element_idx) {
+                                        const bool valid = set_elements[element_idx] >= 0;
+                                        if (valid) {
+                                            const int in_px_idx = set_elements[element_idx];
+                                            int in_y = (in_px_idx / w_in) - DILATION_Y;
+                                            int in_x = (in_px_idx % w_in) - DILATION_X;
+                                            const int out_y = in_y + kernel_y * DILATION_Y;
+                                            const int out_x = in_x + kernel_x * DILATION_X;
+                                            const bool inside = out_y >= 0 && out_y < pixelsPerBlockY && out_x >= 0 && out_x < pixelsPerBlockX; 
+                                            const half2* s_in_px = smem.sparse.s_in[element_idx];
+                                            if (inside) {
+                                                half2 result = __float2half2_rn(0.0f);
+                                                #pragma unroll
+                                                for (int in_c_shared = 0; in_c_shared < n_t_f; ++in_c_shared) {
+                                                    result = __hfma2(__lowhigh2highlow(s_in_px[in_c_shared + t_f_iter*n_t_f]), t_f[in_c_shared], result);
                                                 }
+                                                smem.sparse.s_out[out_y * pixelsPerBlockX + out_x][threadIdx.x] = __hadd2(result, smem.sparse.s_out[out_y * pixelsPerBlockX + out_x][threadIdx.x]);
                                             }
                                         }
                                     }
@@ -3747,18 +3084,9 @@ void deltacnn_3x3_standard(scalar_t *input, scalar_t *output, scalar_t *filter, 
 template<typename scalar_t = float, bool ENABLE_DILATION>
 void deltacnn_dilation(scalar_t *input, scalar_t *output, scalar_t *filter, scalar_t *bias, uint32_t *mask, uint32_t *out_mask, Dimensions dim, ConvConfig config) {
     if (config.kernel_size[0] == 3 && config.kernel_size[1] == 3) {
+        const int kernel_size = 3;
         if (config.groups == 1) {
             deltacnn_3x3_standard<scalar_t, ENABLE_DILATION>(input, output, filter, bias, mask, out_mask, dim, config);
-            // if (config.dilation[0] == 1 && config.dilation[1] == 1) {
-            //     deltacnn_3x3_standard<scalar_t, 1>(input, output, filter, bias, mask, out_mask, dim, config);
-            // } else if (config.dilation[0] == 2 && config.dilation[1] == 2) {
-            //     deltacnn_3x3_standard<scalar_t, 2>(input, output, filter, bias, mask, out_mask, dim, config);
-            // } else if (config.dilation[0] == 4 && config.dilation[1] == 4) {
-            //     deltacnn_3x3_standard<scalar_t, 4>(input, output, filter, bias, mask, out_mask, dim, config);
-            // } else {
-            //     printf("Dilation other than 1x1, 2x2 and 4x4 not supported, got %ix%i\n", config.dilation[0], config.dilation[1]);
-            //     throw "Stride other than 1x1, 2x2 and 4x4 not supported";
-            // }
         } else if (config.groups == dim.out.c && config.groups == dim.in.c) {
             if (config.stride[0] == 1 && config.stride[1] == 1) {
                 const int stride = 1;
@@ -3774,11 +3102,11 @@ void deltacnn_dilation(scalar_t *input, scalar_t *output, scalar_t *filter, scal
 
                 if (dim.out.c <= 32) {
                     const uint32_t threads = 32;
-                    deltacnn_3x3_dw_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 } else if (dim.out.c <= 64) {
                     const uint32_t threads = 64;
-                    deltacnn_3x3_dw_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 } else if (blocks * z_dim < 50) {
                     const uint32_t threads = 64;
@@ -3786,16 +3114,16 @@ void deltacnn_dilation(scalar_t *input, scalar_t *output, scalar_t *filter, scal
                     uint32_t z_dim = dim.batch_size * divup(dim.out.c, out_channels_per_block);
                     dim3 gridDim(x, y, z_dim);
 
-                    deltacnn_3x3_dw_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 } else if (z_dim > 1) {
                     uint32_t z_dim = dim.batch_size * divup(dim.out.c, out_channels_per_block);
                     dim3 gridDim(x, y, z_dim);
 
-                    deltacnn_3x3_dw_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 } else {
-                    deltacnn_3x3_dw_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 }
             } else if (config.stride[0] == 2 && config.stride[1] == 2) {
@@ -3804,26 +3132,25 @@ void deltacnn_dilation(scalar_t *input, scalar_t *output, scalar_t *filter, scal
                 const int pixelsPerBlockY = 6 / stride;
                 const uint32_t threads = 128;
                 const int out_channels_per_block = threads;
-                // uint32_t blocks = dim.batch_size * divup(dim.out.h, pixelsPerBlockY*config.dilation[0]) * divup(dim.out.w, pixelsPerBlockX*config.dilation[1]) * config.dilation[0]*config.dilation[1];
                 uint32_t x = divup(dim.out.w, pixelsPerBlockX * config.dilation[1]) * config.dilation[1];
                 uint32_t y = divup(dim.out.h, pixelsPerBlockY * config.dilation[0]) * config.dilation[0];
                 dim3 gridDim(x, y, dim.batch_size);
 
                 if (dim.out.c <= 32) {
                     const uint32_t threads = 32;
-                    deltacnn_3x3_dw_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 } else if (dim.out.c <= 64) {
                     const uint32_t threads = 32;
-                    deltacnn_3x3_dw_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 } else if (dim.out.c <= 128) {
-                    deltacnn_3x3_dw_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 } else {
                     uint32_t z_dim = divup(dim.out.c, out_channels_per_block);
                     dim3 gridDim(x, y, dim.batch_size * z_dim);
-                    deltacnn_3x3_dw_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 }
             } else {
@@ -3887,7 +3214,6 @@ void deltacnn_dilation(scalar_t *input, scalar_t *output, scalar_t *filter, scal
             const int pixelsPerBlockX = 8;
             const int pixelsPerBlockY = 4;
             const int out_channels_per_block = 32;
-            // uint32_t blocks = dim.batch_size * divup(dim.out.h, pixelsPerBlockY) * divup(dim.out.w, pixelsPerBlockX);
             
             uint32_t x = divup(dim.out.w, pixelsPerBlockX);
             uint32_t y = divup(dim.out.h, pixelsPerBlockY);
@@ -3896,7 +3222,6 @@ void deltacnn_dilation(scalar_t *input, scalar_t *output, scalar_t *filter, scal
             const uint32_t threads = 128;
             const bool sub_tile_sparsity = false;
             
-            // if ((dim.out.c > 256 || (dim.out.c > 128 && blocks < 50))) {
             if (dim.out.c > 128) {
                 const int out_channels_per_thread = 4;
                 const int out_channels_per_block = WARP_SIZE * out_channels_per_thread;
@@ -3905,11 +3230,6 @@ void deltacnn_dilation(scalar_t *input, scalar_t *output, scalar_t *filter, scal
                 deltacnn_1x1_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, out_channels_per_thread, sub_tile_sparsity, false, stride><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
             }
-            // else if (dim.out.c > 128) {
-            //     const int out_channels_per_thread = 8;
-            //     deltacnn_1x1_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, out_channels_per_thread, sub_tile_sparsity, true, stride><<<gridDim, threads>>>(
-            //             input, output, filter, bias, mask, out_mask, dim, config);
-            // } 
             else {
                 const int out_channels_per_thread = 4;
                 deltacnn_1x1_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, out_channels_per_thread, sub_tile_sparsity, true, stride><<<gridDim, threads>>>(
@@ -3921,6 +3241,7 @@ void deltacnn_dilation(scalar_t *input, scalar_t *output, scalar_t *filter, scal
         }
     }
     else if (config.kernel_size[0] == 5 && config.kernel_size[1] == 5) {
+        const int kernel_size = 5;
         if (config.groups == dim.in.c && config.groups == dim.out.c) {
             if (config.stride[0] == 1 && config.stride[1] == 1) {
                 const int stride = 1;
@@ -3937,23 +3258,23 @@ void deltacnn_dilation(scalar_t *input, scalar_t *output, scalar_t *filter, scal
                     const int out_channels_per_block = threads;
                     uint32_t z_dim = divup(dim.out.c, out_channels_per_block);
                     dim3 gridDim(x,y,z_dim * dim.batch_size);
-                    deltacnn_5x5_dw_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 }
                 else if (dim.out.c > 128) {
                     const int threads = 256;
                     const int out_channels_per_block = threads;
-                    deltacnn_5x5_dw_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 } else if (dim.out.c > 64) {
                     const int threads = 128;
                     const int out_channels_per_block = threads;
-                    deltacnn_5x5_dw_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 } else {
                     const int threads = 64;
                     const int out_channels_per_block = threads;
-                    deltacnn_5x5_dw_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 }
 
@@ -3972,23 +3293,23 @@ void deltacnn_dilation(scalar_t *input, scalar_t *output, scalar_t *filter, scal
                     const int out_channels_per_block = threads;
                     uint32_t z_dim = divup(dim.out.c, out_channels_per_block);
                     dim3 gridDim(x,y,z_dim*dim.batch_size);
-                    deltacnn_5x5_dw_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 }
                 else if (dim.out.c > 128) {
                     const int threads = 256;
                     const int out_channels_per_block = threads;
-                    deltacnn_5x5_dw_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 } else if (dim.out.c > 64) {
                     const int threads = 128;
                     const int out_channels_per_block = threads;
-                    deltacnn_5x5_dw_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 } else {
                     const int threads = 64;
                     const int out_channels_per_block = threads;
-                    deltacnn_5x5_dw_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 }
             } else {
@@ -4018,7 +3339,7 @@ void deltacnn_dilation(scalar_t *input, scalar_t *output, scalar_t *filter, scal
         dim3 gridDim(x, y, dim.batch_size);
         const int threads = 64;
         const int out_channels_per_block = threads;
-        deltacnn_7x7_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+        deltacnn_standard_conv_sp<scalar_t, 7, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
             input, output, filter, bias, mask, out_mask, dim, config);
     }
     else {
@@ -4043,6 +3364,8 @@ void deltacnn_hp_templates(half *input, half *output, half *filter, half* bias, 
     const int out_c_per_thread = 2;
 
     if (config.kernel_size[0] == 3 && config.kernel_size[1] == 3) {
+        const int kernel_size = 3;
+
         if (config.groups == 1) {
             if (config.stride[0] == 1 && config.stride[1] == 1) {
                 const int stride = 1;
@@ -4059,22 +3382,30 @@ void deltacnn_hp_templates(half *input, half *output, half *filter, half* bias, 
                     const int out_channels_per_block = threads * out_c_per_thread;
                     const int z_dim = divup(dim.out.c, out_channels_per_block);
                     dim3 gridDim(x, y, dim.batch_size * z_dim);
-                    deltacnn_3x3_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, out_c_per_thread, SUB_TILE_SPARSITY, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_standard_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, SUB_TILE_SPARSITY, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         (half*)input, (half*)output, (half*)filter, (half*) bias, mask, out_mask, dim, config);
+                    // deltacnn_3x3_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, out_c_per_thread, SUB_TILE_SPARSITY, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    //     (half*)input, (half*)output, (half*)filter, (half*) bias, mask, out_mask, dim, config);
                 }
                 else if (dim.out.c <= 64) {
                     const uint32_t threads = 32;
-                    deltacnn_3x3_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, out_c_per_thread, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_standard_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         (half*)input, (half*)output, (half*)filter, (half*) bias, mask, out_mask, dim, config);
+                    // deltacnn_3x3_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, out_c_per_thread, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    //     (half*)input, (half*)output, (half*)filter, (half*) bias, mask, out_mask, dim, config);
                 } else if (dim.out.c <= 128) {
                     const uint32_t threads = 64;
-                    deltacnn_3x3_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, out_c_per_thread, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_standard_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         (half*)input, (half*)output, (half*)filter, (half*) bias, mask, out_mask, dim, config);
+                    // deltacnn_3x3_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, out_c_per_thread, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    //     (half*)input, (half*)output, (half*)filter, (half*) bias, mask, out_mask, dim, config);
                 } else
                 {
                     const uint32_t threads = 128;
-                    deltacnn_3x3_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, out_c_per_thread, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_standard_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         (half*)input, (half*)output, (half*)filter, (half*) bias, mask, out_mask, dim, config);
+                    // deltacnn_3x3_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, out_c_per_thread, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    //     (half*)input, (half*)output, (half*)filter, (half*) bias, mask, out_mask, dim, config);
                 }
             } else if (config.stride[0] == 2 && config.stride[1] == 2) {
                 const int stride = 2;
@@ -4092,22 +3423,30 @@ void deltacnn_hp_templates(half *input, half *output, half *filter, half* bias, 
                     const int out_channels_per_block = threads * out_c_per_thread;
                     const int z_dim = divup(dim.out.c, out_channels_per_block);
                     dim3 gridDim(x, y, dim.batch_size * z_dim);
-                    deltacnn_3x3_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, out_c_per_thread, SUB_TILE_SPARSITY, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_standard_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, SUB_TILE_SPARSITY, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         (half*)input, (half*)output, (half*)filter, (half*) bias, mask, out_mask, dim, config);
+                    // deltacnn_3x3_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, out_c_per_thread, SUB_TILE_SPARSITY, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    //     (half*)input, (half*)output, (half*)filter, (half*) bias, mask, out_mask, dim, config);
                 }
                 else if (dim.out.c <= 64) {
                     const uint32_t threads = 64;
-                    deltacnn_3x3_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, out_c_per_thread, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_standard_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         (half*)input, (half*)output, (half*)filter, (half*) bias, mask, out_mask, dim, config);
+                    // deltacnn_3x3_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, out_c_per_thread, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    //     (half*)input, (half*)output, (half*)filter, (half*) bias, mask, out_mask, dim, config);
                 } else if (dim.out.c <= 128) {
                     const uint32_t threads = 64;
-                    deltacnn_3x3_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, out_c_per_thread, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_standard_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         (half*)input, (half*)output, (half*)filter, (half*) bias, mask, out_mask, dim, config);
+                    // deltacnn_3x3_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, out_c_per_thread, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    //     (half*)input, (half*)output, (half*)filter, (half*) bias, mask, out_mask, dim, config);
                 } else 
                 {
                     const uint32_t threads = 128;
-                    deltacnn_3x3_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, out_c_per_thread, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_standard_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         (half*)input, (half*)output, (half*)filter, (half*) bias, mask, out_mask, dim, config);
+                    // deltacnn_3x3_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, out_c_per_thread, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    //     (half*)input, (half*)output, (half*)filter, (half*) bias, mask, out_mask, dim, config);
                 } 
             } else {
                     printf("Stride other than 1x1 and 2x2 not supported, got %ix%i\n", config.stride[0], config.stride[1]);
@@ -4118,7 +3457,6 @@ void deltacnn_hp_templates(half *input, half *output, half *filter, half* bias, 
                 const int stride = 1;
                 const int pixelsPerBlockX = 4;
                 const int pixelsPerBlockY = 4;
-                // uint32_t blocks = dim.batch_size * divup(dim.out.h, pixelsPerBlockY*config.dilation[0]) * divup(dim.out.w, pixelsPerBlockX*config.dilation[1]) * config.dilation[0]*config.dilation[1];
                 uint32_t x = divup(dim.out.w, pixelsPerBlockX * config.dilation[1]) * config.dilation[1];
                 uint32_t y = divup(dim.out.h, pixelsPerBlockY * config.dilation[0]) * config.dilation[0];
                 dim3 gridDim(x, y, dim.batch_size);
@@ -4126,24 +3464,23 @@ void deltacnn_hp_templates(half *input, half *output, half *filter, half* bias, 
                 if (dim.out.c <= 64) {
                     const uint32_t threads = 32;
                     const int out_channels_per_block = threads * out_c_per_thread;
-                    deltacnn_3x3_dw_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 } else if (dim.out.c <= 128) {
                     const uint32_t threads = 64;
                     const int out_channels_per_block = threads * out_c_per_thread;
-                    deltacnn_3x3_dw_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 } else {
                     const uint32_t threads = 128;
                     const int out_channels_per_block = threads * out_c_per_thread;
-                    deltacnn_3x3_dw_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 }
             } else if (config.stride[0] == 2 && config.stride[1] == 2) {
                 const int stride = 2;
                 const int pixelsPerBlockX = 3;
                 const int pixelsPerBlockY = 3;
-                // uint32_t blocks = dim.batch_size * divup(dim.out.h, pixelsPerBlockY*config.dilation[0]) * divup(dim.out.w, pixelsPerBlockX*config.dilation[1]) * config.dilation[0]*config.dilation[1];
                 uint32_t x = divup(dim.out.w, pixelsPerBlockX * config.dilation[1]) * config.dilation[1];
                 uint32_t y = divup(dim.out.h, pixelsPerBlockY * config.dilation[0]) * config.dilation[0];
                 dim3 gridDim(x, y, dim.batch_size);
@@ -4151,17 +3488,17 @@ void deltacnn_hp_templates(half *input, half *output, half *filter, half* bias, 
                 if (dim.out.c <= 64) {
                     const uint32_t threads = 32;
                     const int out_channels_per_block = threads * out_c_per_thread;
-                    deltacnn_3x3_dw_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 } else if (dim.out.c <= 128) {
                     const uint32_t threads = 64;
                     const int out_channels_per_block = threads * out_c_per_thread;
-                    deltacnn_3x3_dw_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 } else {
                     const uint32_t threads = 128;
                     const int out_channels_per_block = threads * out_c_per_thread;
-                    deltacnn_3x3_dw_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, SUB_TILE_SPARSITY, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 }
             } else {
@@ -4332,6 +3669,7 @@ void deltacnn_hp_templates(half *input, half *output, half *filter, half* bias, 
             throw "Stride other than 1x1 and 2x2 not supported for 1x1 conv";
         }
     } else if (config.kernel_size[0] == 5 && config.kernel_size[1] == 5) {
+        const int kernel_size = 5;
         if (config.groups == dim.in.c && config.groups == dim.out.c) {
             if (config.stride[0] == 1 && config.stride[1] == 1) {
                 const int stride = 1;
@@ -4342,32 +3680,29 @@ void deltacnn_hp_templates(half *input, half *output, half *filter, half* bias, 
                 uint32_t x = divup(dim.out.w, pixelsPerBlockX * config.dilation[1]) * config.dilation[1];
                 uint32_t y = divup(dim.out.h, pixelsPerBlockY * config.dilation[0]) * config.dilation[0];
                 dim3 gridDim(x, y, dim.batch_size);
-
-                // const int threads = 256;
-                // const int out_channels_per_block = threads * out_c_per_thread;
         
                 if (dim.out.c > 256 || (blocks < 50 && dim.out.c >= 128)) {
                     const int threads = 64;
                     const int out_channels_per_block = threads * out_c_per_thread;
                     uint32_t z_dim = divup(dim.out.c, out_channels_per_block);
                     dim3 gridDim(x,y,z_dim*dim.batch_size);
-                    deltacnn_5x5_dw_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 }
                 else if (dim.out.c > 128) {
                     const int threads = 128;
                     const int out_channels_per_block = threads * out_c_per_thread;
-                    deltacnn_5x5_dw_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 } else if (dim.out.c > 64) {
                     const int threads = 64;
                     const int out_channels_per_block = threads * out_c_per_thread;
-                    deltacnn_5x5_dw_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 } else {
                     const int threads = 32;
                     const int out_channels_per_block = threads * out_c_per_thread;
-                    deltacnn_5x5_dw_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 }
             } 
@@ -4386,23 +3721,23 @@ void deltacnn_hp_templates(half *input, half *output, half *filter, half* bias, 
                     const int out_channels_per_block = threads * out_c_per_thread;
                     uint32_t z_dim = divup(dim.out.c, out_channels_per_block);
                     dim3 gridDim(x, y, z_dim * dim.batch_size);
-                    deltacnn_5x5_dw_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 }
                 else if (dim.out.c > 128) {
                     const int threads = 128;
                     const int out_channels_per_block = threads * out_c_per_thread;
-                    deltacnn_5x5_dw_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 } else if (dim.out.c > 64) {
                     const int threads = 64;
                     const int out_channels_per_block = threads * out_c_per_thread;
-                    deltacnn_5x5_dw_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 } else {
                     const int threads = 32;
                     const int out_channels_per_block = threads * out_c_per_thread;
-                    deltacnn_5x5_dw_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                    deltacnn_dw_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
                         input, output, filter, bias, mask, out_mask, dim, config);
                 }
             } 
@@ -4428,13 +3763,12 @@ void deltacnn_hp_templates(half *input, half *output, half *filter, half* bias, 
         const int pixelsPerBlockX = 3;
         const int pixelsPerBlockY = 3;
         
-        // uint32_t blocks = dim.batch_size * divup(dim.out.h, pixelsPerBlockY*config.dilation[0]) * divup(dim.out.w, pixelsPerBlockX*config.dilation[1]) * config.dilation[0]*config.dilation[1];
         uint32_t x = divup(dim.out.w, pixelsPerBlockX * config.dilation[1]) * config.dilation[1];
         uint32_t y = divup(dim.out.h, pixelsPerBlockY * config.dilation[0]) * config.dilation[0];
         dim3 gridDim(x, y, dim.batch_size);
         const int threads = 64;
         const int out_channels_per_block = threads * 2;
-        deltacnn_7x7_hp<half, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+        deltacnn_standard_conv_hp<half, 7, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
             input, output, filter, bias, mask, out_mask, dim, config);
     } 
     else {
@@ -4452,11 +3786,6 @@ void deltacnn_hp(half *input, half *output, half *filter, half* bias, uint32_t *
     if (!config.sub_tile_sparsity) {
         printf("INFO: subtile sparsity is always enabled\n");
     }
-    // if (config.sub_tile_sparsity){
-    //     deltacnn_hp_templates<true>(input, output, filter, bias, mask, out_mask, dim, config);
-    // } else {
-    //     deltacnn_hp_templates<false>(input, output, filter, bias, mask, out_mask, dim, config);
-    // }
 }
 
 template void deltacnn<float>(float *input, float *output, float *filter, float *bias, uint32_t *mask, uint32_t *out_mask, Dimensions dim, ConvConfig config);

@@ -276,12 +276,22 @@ class DCConv2d(nn.Conv2d, SparseModule):
         self.dense_out = dense_out
         self.use_logging = use_logging
 
+        self.densify_layer: DCDensify = None
+        self.activation_layer: DCSparseActivation = None
+        if self.dense_out:
+            self.densify_layer = DCDensify(activation=activation, name=self.name)
+        elif self.activation is not None:
+            self.activation_layer = DCSparseActivation(self.name, diff_threshold=diff_threshold, activation=activation)
+        elif self.logging_enabled():
+            self.activation_layer = DCSparseActivation(self.name, inplace=False, diff_threshold=-1, activation=None, truncation_mode=DCTruncation.none)
+
         if self.logging_enabled():
             self.computation_logger = ComputationsLogger(name=self.name)
             self.multiplications_logger = MultiplicationsLogger(name=self.name)
             self.input_logger = InputLogger(name=self.name)
             self.prev_in_logger = PrevInputLogger(name=self.name)
             self.output_logger = OutputLogger(name=self.name)
+
         self.conv_idx = -1
         self.dense_in = False
         self.mask = None
@@ -584,58 +594,13 @@ class DCConv2d(nn.Conv2d, SparseModule):
             out_mask=self.out_mask,
             out_shape=self.out_shape
         )
-
-        # ######### for debugging....
-        # my_out = out if type(out) == Tensor else out[0]
-        # tiled_mask = torch.repeat_interleave(mask != 0, dim=1, repeats=x.shape[1])
-        # if not self.dense_out:
-        #     tiled_out_mask = torch.repeat_interleave(out[1] != 0, dim=1, repeats=self.out_channels)
-        # else:
-        #     tiled_out_mask = torch.ones_like(my_out) != 0
-        # x[~tiled_mask] = 0.0
-        # out_original = torch.conv2d(x, self.orig_weights,
-        #                             self.bias if first_iter else None,
-        #                             self.stride, self.padding, self.dilation, self.groups)
-        #
-        # if torch.sum((my_out - out_original)[tiled_out_mask] > 0.1) > 0:
-        #     print("")
+        
 
         if self.dense_out:
-            use_old_version = False
-            if use_old_version:
-                if type(out) != Tensor:
-                    out, out_mask = out
-
-                if self.prev_out is not None:
-                    self.prev_out += out
-                else:
-                    self.prev_out = out.clone()
-                SparseModule.temp_buffers.append(self.prev_out)
-
-                if self.logging_enabled():
-                    self.output_logger(self.prev_out)
-
-                if self.activation is not None:
-                    out = self.activation(self.prev_out)
-                else:
-                    out[:] = self.prev_out[:]
-
-                return out
-            else:
-                out, out_mask = out
-                if self.prev_out is None:
-                    self.prev_out = out.clone()
-                    SparseModule.temp_buffers.append(self.prev_out)
-                    if self.activation is not None:
-                        out = self.activation(self.prev_out)
-                else:
-                    sparse_add_to_dense_tensor(out, self.prev_out, out_mask, self.activation_int)
-                    if self.activation is None:
-                        out = self.prev_out
-
-                if self.logging_enabled():
-                    self.output_logger(self.prev_out)
-                return out
+            out = self.densify_layer(out)
+            if self.logging_enabled():
+                self.output_logger(self.densify_layer.prev_out)
+            return out
         else:
             if type(out) == Tensor:
                 out_mask = None
@@ -647,35 +612,15 @@ class DCConv2d(nn.Conv2d, SparseModule):
                 self.multiplications_logger(out_mask != 0, self.weight, mask != 0, kernel_size=self.kernel_size, dilation=self.dilation, stride=self.stride,
                                             padding=self.padding)
 
-            if first_iter:
-                if self.activation is not None or self.dense_out or self.logging_enabled():
-                    self.prev_out = out.clone()
-                    if self.activation is not None:
-                        out = self.activation(out)
-                    self.out_truncated = torch.zeros_like(out)
-                    SparseModule.temp_buffers.append(self.prev_out)
-                    SparseModule.temp_buffers.append(self.out_truncated)
-
-                    if self.logging_enabled():
-                        self.output_logger(self.prev_out)
-
-                self.out_mask = out_mask
-            elif out_mask is not None and (self.activation is not None or self.dense_out):
-                threshold = DCThreshold.get(self)
-
-                if first_iter:
-                    threshold = 0.0
-
-                sparse_activation(out, self.prev_out, self.out_truncated, out_mask, threshold, self.activation_int, DCConv2d.truncation_mode.value)
-
+            if self.activation is not None:
+                out = self.activation_layer((out, out_mask))
                 if self.logging_enabled():
-                    self.output_logger(self.prev_out)
-
+                    self.output_logger(self.activation_layer.prev_out)
+                    self.truncated_logger(self.activation_layer.out_truncated)
+                return out
             elif self.logging_enabled():
-                _out = out.detach().clone()
-                _out_mask = out_mask.detach().clone()
-                sparse_activation(_out, self.prev_out, self.out_truncated, _out_mask, -1, -1, 0)
-                self.output_logger(self.prev_out)
+                _ = self.activation_layer((out, out_mask))
+                self.output_logger(self.activation_layer.prev_out)
 
             return out, out_mask
 
@@ -704,35 +649,17 @@ class DCConv2d(nn.Conv2d, SparseModule):
         )
 
         if self.dense_out:
-            out, out_mask = out
-            if self.prev_out is None:
-                self.prev_out = out.clone()
-                SparseModule.temp_buffers.append(self.prev_out)
-                if self.activation is not None:
-                    out = self.activation(self.prev_out)
-            else:
-                sparse_add_to_dense_tensor(out, self.prev_out, out_mask, self.activation_int)
-                if self.activation is None:
-                    out = self.prev_out
-
+            out = self.densify_layer(out)
             return out
         else:
-            out, out_mask = out
+            if type(out) == Tensor:
+                out_mask = None
+            else:
+                out, out_mask = out
 
-            if first_iter:
-                if self.activation is not None or self.dense_out:
-                    self.prev_out = out.clone()
-                    if self.activation is not None:
-                        out = self.activation(out)
-                    self.out_truncated = torch.zeros_like(out)
-                    SparseModule.temp_buffers.append(self.prev_out)
-                    SparseModule.temp_buffers.append(self.out_truncated)
-
-                self.out_mask = out_mask
-            elif self.activation is not None:
-                threshold = DCThreshold.get(self)
-
-                sparse_activation(out, self.prev_out, self.out_truncated, out_mask, threshold, self.activation_int, DCConv2d.truncation_mode.value)
+            if self.activation is not None:
+                out = self.activation_layer((out, out_mask))
+                return out
 
             return out, out_mask
 
@@ -812,6 +739,15 @@ class DCConvTranspose2d(nn.ConvTranspose2d, SparseModule):
         self.stores_prev_in = store_prev_in
         self.dense_out = dense_out
         self.use_logging = use_logging
+
+        self.densify_layer: DCDensify = None
+        self.activation_layer: DCSparseActivation = None
+        if self.dense_out:
+            self.densify_layer = DCDensify(activation=activation, name=self.name)
+        elif self.activation is not None:
+            self.activation_layer = DCSparseActivation(self.name, diff_threshold=diff_threshold, activation=activation)
+        elif self.logging_enabled():
+            self.activation_layer = DCSparseActivation(self.name, inplace=False, diff_threshold=-1, activation=None, truncation_mode=DCTruncation.none)
 
         if self.logging_enabled():
             self.computation_logger = ComputationsLogger(name=self.name)
@@ -1116,57 +1052,13 @@ class DCConvTranspose2d(nn.ConvTranspose2d, SparseModule):
             out_mask=self.out_mask,
             out_shape=self.out_shape
         )
-
-        # my_out = out if type(out) == Tensor else out[0]
-        # tiled_mask = torch.repeat_interleave(mask != 0, dim=1, repeats=x.shape[1])
-        # if not self.dense_out:
-        #     tiled_out_mask = torch.repeat_interleave(out[1] != 0, dim=1, repeats=self.out_channels)
-        # else:
-        #     tiled_out_mask = torch.ones_like(my_out) != 0
-        # x[~tiled_mask] = 0.0
-        # out_original = torch.conv2d(x, self.orig_weights,
-        #                             self.bias if first_iter else None,
-        #                             self.stride, self.padding, self.dilation, self.groups)
-        #
-        # if torch.sum((my_out - out_original)[tiled_out_mask] > 0.1) > 0:
-        #     print("")
+        
 
         if self.dense_out:
-            use_old_version = False
-            if use_old_version:
-                if type(out) != Tensor:
-                    out, out_mask = out
-
-                if self.prev_out is not None:
-                    self.prev_out += out
-                else:
-                    self.prev_out = out.clone()
-                SparseModule.temp_buffers.append(self.prev_out)
-
-                if self.logging_enabled():
-                    self.output_logger(self.prev_out)
-
-                if self.activation is not None:
-                    out = self.activation(self.prev_out)
-                else:
-                    out[:] = self.prev_out[:]
-
-                return out
-            else:
-                out, out_mask = out
-                if self.prev_out is None:
-                    self.prev_out = out.clone()
-                    SparseModule.temp_buffers.append(self.prev_out)
-                    if self.activation is not None:
-                        out = self.activation(self.prev_out)
-                else:
-                    sparse_add_to_dense_tensor(out, self.prev_out, out_mask, self.activation_int)
-                    if self.activation is None:
-                        out = self.prev_out
-
-                if self.logging_enabled():
-                    self.output_logger(self.prev_out)
-                return out
+            out = self.densify_layer(out)
+            if self.logging_enabled():
+                self.output_logger(self.densify_layer.prev_out)
+            return out
         else:
             if type(out) == Tensor:
                 out_mask = None
@@ -1178,35 +1070,15 @@ class DCConvTranspose2d(nn.ConvTranspose2d, SparseModule):
                 self.multiplications_logger(out_mask != 0, self.weight, mask != 0, kernel_size=self.kernel_size, dilation=self.dilation, stride=self.stride,
                                             padding=self.padding)
 
-            if first_iter:
-                if self.activation is not None or self.dense_out or self.logging_enabled():
-                    self.prev_out = out.clone()
-                    if self.activation is not None:
-                        out = self.activation(out)
-                    self.out_truncated = torch.zeros_like(out)
-                    SparseModule.temp_buffers.append(self.prev_out)
-                    SparseModule.temp_buffers.append(self.out_truncated)
-
-                    if self.logging_enabled():
-                        self.output_logger(self.prev_out)
-
-                self.out_mask = out_mask
-            elif out_mask is not None and (self.activation is not None or self.dense_out):
-                threshold = DCThreshold.get(self)
-
-                if first_iter:
-                    threshold = 0.0
-
-                sparse_activation(out, self.prev_out, self.out_truncated, out_mask, threshold, self.activation_int, DCConv2d.truncation_mode.value)
-
+            if self.activation is not None:
+                out = self.activation_layer((out, out_mask))
                 if self.logging_enabled():
-                    self.output_logger(self.prev_out)
-
+                    self.output_logger(self.activation_layer.prev_out)
+                    self.truncated_logger(self.activation_layer.out_truncated)
+                return out
             elif self.logging_enabled():
-                _out = out.detach().clone()
-                _out_mask = out_mask.detach().clone()
-                sparse_activation(_out, self.prev_out, self.out_truncated, _out_mask, -1, -1, 0)
-                self.output_logger(self.prev_out)
+                _ = self.activation_layer((out, out_mask))
+                self.output_logger(self.activation_layer.prev_out)
 
             return out, out_mask
 
@@ -1233,37 +1105,19 @@ class DCConvTranspose2d(nn.ConvTranspose2d, SparseModule):
             out_mask=self.out_mask,
             out_shape=self.out_shape
         )
-
+        
         if self.dense_out:
-            out, out_mask = out
-            if self.prev_out is None:
-                self.prev_out = out.clone()
-                SparseModule.temp_buffers.append(self.prev_out)
-                if self.activation is not None:
-                    out = self.activation(self.prev_out)
-            else:
-                sparse_add_to_dense_tensor(out, self.prev_out, out_mask, self.activation_int)
-                if self.activation is None:
-                    out = self.prev_out
-
+            out = self.densify_layer(out)
             return out
         else:
-            out, out_mask = out
+            if type(out) == Tensor:
+                out_mask = None
+            else:
+                out, out_mask = out
 
-            if first_iter:
-                if self.activation is not None or self.dense_out:
-                    self.prev_out = out.clone()
-                    if self.activation is not None:
-                        out = self.activation(out)
-                    self.out_truncated = torch.zeros_like(out)
-                    SparseModule.temp_buffers.append(self.prev_out)
-                    SparseModule.temp_buffers.append(self.out_truncated)
-
-                self.out_mask = out_mask
-            elif self.activation is not None:
-                threshold = DCThreshold.get(self)
-
-                sparse_activation(out, self.prev_out, self.out_truncated, out_mask, threshold, self.activation_int, DCConv2d.truncation_mode.value)
+            if self.activation is not None:
+                out = self.activation_layer((out, out_mask))
+                return out
 
             return out, out_mask
 

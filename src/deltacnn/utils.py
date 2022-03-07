@@ -4,7 +4,6 @@ import munkres
 import numpy as np
 import torch
 
-# solution proposed in https://github.com/pytorch/pytorch/issues/229#issuecomment-299424875
 from torch.nn.functional import conv2d
 
 

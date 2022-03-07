@@ -1,12 +1,9 @@
 from setuptools import setup, find_packages
 from torch.utils.cpp_extension import (
-    CppExtension,
     CUDAExtension,
     CUDA_HOME,
     BuildExtension,
 )
-import os
-import sysconfig
 _DEBUG = False
 _DEBUG_LEVEL = 0
 
