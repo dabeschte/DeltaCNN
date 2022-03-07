@@ -173,6 +173,15 @@ class DCThreshold:
                 cls.t[key] = thresholds[str(i - skip_thresholds)] * cls.scale
 
     @classmethod
+    def save_thresholds(cls, name):
+        res = {}
+        for i, val in enumerate(cls.t.values()):
+            res[i] = val
+        import json
+        with open(f"thresholds_{name}.json", "w+") as f:
+            json.dump(res, f)
+
+    @classmethod
     def reset(cls):
         cls.t.clear()
         cls.initialized = False
@@ -195,7 +204,7 @@ class DCThreshold:
         cls.is_parameterized = True
 
 
-class SparseModule(nn.Module):
+class DCModule(nn.Module):
     temp_buffers = []
 
     def __init__(self):
@@ -206,7 +215,28 @@ class SparseModule(nn.Module):
         return sum([x.numel() for x in cls.temp_buffers])
 
     def reset(self):
-        SparseModule.temp_buffers = []
+        DCModule.temp_buffers = []
+
+    def process_filters(self):
+        modules = list(self.modules())
+
+        for mod in modules:
+            if type(mod) in [DCConv2d, DCConvTranspose2d]:
+                mod.process_filters()
+
+    def reset_layers(self):
+        def reset_recursive(mod):
+            for module in mod.modules():
+                if module == mod or module in checked_modules:
+                    continue
+                checked_modules.append(module)
+                if issubclass(type(module), DCModule):
+                    module.reset()
+                reset_recursive(module)
+
+        checked_modules = [self]
+        reset_recursive(self)
+        DCModule.temp_buffers.clear()
 
 
 def to_tuple(*args) -> _size_2_t:
@@ -224,7 +254,7 @@ def to_tuple(*args) -> _size_2_t:
     return result
 
 
-class DCConv2d(nn.Conv2d, SparseModule):
+class DCConv2d(nn.Conv2d, DCModule):
     diff_threshold = 0.0
     backend = DCBackend.deltacnn
     conv_idx = -1
@@ -355,7 +385,7 @@ class DCConv2d(nn.Conv2d, SparseModule):
             self.stores_prev_in = True
             mask = torch.ones_like(x[:, :1], dtype=torch.int)
             self.prev_in = x.clone()
-            SparseModule.temp_buffers.append(self.prev_in)
+            DCModule.temp_buffers.append(self.prev_in)
         else:
             if self.conv_idx == 0:
                 # dilate mask
@@ -529,8 +559,8 @@ class DCConv2d(nn.Conv2d, SparseModule):
                 DCConv2d.flops_sum += n_updated * self.weight.numel()
 
             if first_iter:
-                SparseModule.temp_buffers.append(self._cbinfer.prevInput)
-                SparseModule.temp_buffers.append(self._cbinfer.prevOutput)
+                DCModule.temp_buffers.append(self._cbinfer.prevInput)
+                DCModule.temp_buffers.append(self._cbinfer.prevOutput)
 
             if self.activation_int > 1:
                 # only if the activation is not ReLU, use built-in
@@ -551,8 +581,8 @@ class DCConv2d(nn.Conv2d, SparseModule):
 
             if first_iter:
                 # still count them in, because it would otherwise be uncomparable
-                SparseModule.temp_buffers.append(input.clone())
-                SparseModule.temp_buffers.append(out.clone())
+                DCModule.temp_buffers.append(input.clone())
+                DCModule.temp_buffers.append(out.clone())
 
         return out
 
@@ -701,7 +731,7 @@ class DCConv2d(nn.Conv2d, SparseModule):
             self.process_filters_single()
 
 
-class DCConvTranspose2d(nn.ConvTranspose2d, SparseModule):
+class DCConvTranspose2d(nn.ConvTranspose2d, DCModule):
     def __init__(
             self,
             in_channels: int,
@@ -818,7 +848,7 @@ class DCConvTranspose2d(nn.ConvTranspose2d, SparseModule):
             self.stores_prev_in = True
             mask = torch.ones_like(x[:, :1], dtype=torch.int)
             self.prev_in = x.clone()
-            SparseModule.temp_buffers.append(self.prev_in)
+            DCModule.temp_buffers.append(self.prev_in)
         else:
             if self.conv_idx == 0:
                 # dilate mask
@@ -990,8 +1020,8 @@ class DCConvTranspose2d(nn.ConvTranspose2d, SparseModule):
             out = self._cbinfer(input)
 
             if first_iter:
-                SparseModule.temp_buffers.append(self._cbinfer.prevInput)
-                SparseModule.temp_buffers.append(self._cbinfer.prevOutput)
+                DCModule.temp_buffers.append(self._cbinfer.prevInput)
+                DCModule.temp_buffers.append(self._cbinfer.prevOutput)
 
             if self.activation_int > 1:
                 # only if the activation is not ReLU, use built-in
@@ -1009,8 +1039,8 @@ class DCConvTranspose2d(nn.ConvTranspose2d, SparseModule):
 
             if first_iter:
                 # still count them in, because it would otherwise be uncomparable
-                SparseModule.temp_buffers.append(input.clone())
-                SparseModule.temp_buffers.append(out.clone())
+                DCModule.temp_buffers.append(input.clone())
+                DCModule.temp_buffers.append(out.clone())
 
         return out
 
@@ -1159,7 +1189,7 @@ class DCConvTranspose2d(nn.ConvTranspose2d, SparseModule):
             self.process_filters_single()
 
 
-class DCSparseAccumulate(SparseModule):
+class DCSparseAccumulate(DCModule):
     idx = -1
 
     def __init__(self, activation: str = None, dense_out=False, weight_a=None, weight_b=None, name=""):
@@ -1207,7 +1237,7 @@ class DCSparseAccumulate(SparseModule):
             self.idx = DCSparseAccumulate.idx
             if self.dense_out or self.activation is not None:
                 self.prev_out = torch.zeros_like(val_a)
-                SparseModule.temp_buffers.append(self.prev_out)
+                DCModule.temp_buffers.append(self.prev_out)
 
             self.mask_out = torch.empty_like(val_a[:, :1], dtype=torch.int)
 
@@ -1258,7 +1288,7 @@ class DCSparseAccumulate(SparseModule):
         DCSparseAccumulate.idx = -1
 
 
-class DCSparsify(SparseModule):
+class DCSparsify(DCModule):
     idx = -1
 
     def __init__(self, name="", diff_threshold=None, dilation=-1):
@@ -1284,7 +1314,7 @@ class DCSparsify(SparseModule):
             DCSparsify.idx += 1
             self.idx = DCSparsify.idx
             self.prev_in = input.clone()
-            SparseModule.temp_buffers.append(self.prev_in)
+            DCModule.temp_buffers.append(self.prev_in)
             mask = torch.ones_like(input[:, :1], dtype=torch.int)
 
             if DCConv2d.backend == DCBackend.delta_cudnn:
@@ -1337,7 +1367,7 @@ class DCSparsify(SparseModule):
         DCSparsify.idx = -1
 
 
-class DCDensify(SparseModule):
+class DCDensify(DCModule):
     idx = -1
 
     def __init__(self, activation: str = None, name="", clone_out=True):
@@ -1369,7 +1399,7 @@ class DCDensify(SparseModule):
             DCDensify.idx += 1
             self.idx = DCDensify.idx
             self.prev_out = torch.zeros_like(input)
-            SparseModule.temp_buffers.append(self.prev_out)
+            DCModule.temp_buffers.append(self.prev_out)
 
         use_python = False
         if use_python:
@@ -1393,7 +1423,7 @@ class DCDensify(SparseModule):
         self.prev_out = None
 
 
-class DCSparseUpsample(SparseModule):
+class DCSparseUpsample(DCModule):
     idx = -1
 
     def __init__(self, scale_factor=2, mode="nearest", name=""):
@@ -1420,7 +1450,7 @@ class DCSparseUpsample(SparseModule):
         self.out = None
 
 
-class DCSparseActivation(SparseModule):
+class DCSparseActivation(DCModule):
     idx = -1
 
     def __init__(self, name="", inplace=True, diff_threshold=None, activation="relu"):
@@ -1452,8 +1482,8 @@ class DCSparseActivation(SparseModule):
                 self.idx = DCSparseActivation.idx
             self.prev_out = val.clone()
             self.out_truncated = torch.zeros_like(val)
-            SparseModule.temp_buffers.append(self.prev_out)
-            SparseModule.temp_buffers.append(self.out_truncated)
+            DCModule.temp_buffers.append(self.prev_out)
+            DCModule.temp_buffers.append(self.out_truncated)
             val = self.activation(val)
             if DCConv2d.backend == DCBackend.delta_cudnn:
                 return val
@@ -1484,7 +1514,7 @@ class DCSparseActivation(SparseModule):
         DCSparseActivation.idx = -1
 
 
-class DCSparseMaxPooling(nn.MaxPool2d, SparseModule):
+class DCSparseMaxPooling(nn.MaxPool2d, DCModule):
     def __init__(self,
                  kernel_size: _size_2_t,
                  stride: _size_2_t = (1, 1),
@@ -1520,7 +1550,7 @@ class DCSparseMaxPooling(nn.MaxPool2d, SparseModule):
             if self.first_iter:
                 self.first_iter = False
                 self.prev_in = torch.zeros_like(x)
-                SparseModule.temp_buffers.append(self.prev_in)
+                DCModule.temp_buffers.append(self.prev_in)
 
             out = sparse_pooling(x, self.prev_in, self.kernel_size, mask, self.stride, self.padding, self.dilation, create_out_mask=True,
                                  sub_tile_sparsity=True, pooling_mode_int=0, out_shape=self.out_shape)
@@ -1533,7 +1563,7 @@ class DCSparseMaxPooling(nn.MaxPool2d, SparseModule):
         self.prev_in = None
 
 
-class DCSparseAdaptiveAveragePooling(nn.AdaptiveAvgPool2d, SparseModule):
+class DCSparseAdaptiveAveragePooling(nn.AdaptiveAvgPool2d, DCModule):
     def __init__(self,
                  output_size: _size_2_t = None
                  ):
@@ -1572,7 +1602,7 @@ class DCSparseAdaptiveAveragePooling(nn.AdaptiveAvgPool2d, SparseModule):
         self.prev_in = None
 
 
-class DCBatchNorm2d(nn.BatchNorm2d, SparseModule):
+class DCBatchNorm2d(nn.BatchNorm2d, DCModule):
     def __init__(
             self,
             num_features,
