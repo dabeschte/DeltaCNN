@@ -191,17 +191,17 @@ for frame_idx, frame in enumerate(video):
 sequence = load_video()
 DCConv2d.diff_threshold = 0.0
 model = init_model()
-ref_loss = calc_loss(model(sequence))
+ref_loss = calc_loss(model, sequence)
 max_per_layer_loss_increase = 1.001 # some random number
 step_size = 2 # some random number
 
 for key in DCThreshold.t.keys():
-    start_loss = calc_loss(model(sequence))
+    start_loss = calc_loss(model, sequence)
     DCThreshold.t[key] = 0.001 # some random number
 
-    while calc_loss(model(sequence)) < start_loss * max_per_layer_loss_increase:
+    while calc_loss(model, sequence) < start_loss * max_per_layer_loss_increase:
         DCThreshold.t[key] *= step_size
-    DCThreshold.t[key] /= step_size # since lost with prev threshold was already too large, go back a step
+    DCThreshold.t[key] /= step_size # since loss with prev threshold was already too large, go back a step
 
 ```
 
