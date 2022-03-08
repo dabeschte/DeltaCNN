@@ -1189,11 +1189,11 @@ class DCConvTranspose2d(nn.ConvTranspose2d, DCModule):
             self.process_filters_single()
 
 
-class DCSparseAccumulate(DCModule):
+class DCSparseAdd(DCModule):
     idx = -1
 
     def __init__(self, activation: str = None, dense_out=False, weight_a=None, weight_b=None, name=""):
-        super(DCSparseAccumulate, self).__init__()
+        super(DCSparseAdd, self).__init__()
         self.name = name
         self.dense_out = dense_out
         self.activation, self.activation_int = convert_activation_string(activation)
@@ -1233,8 +1233,8 @@ class DCSparseAccumulate(DCModule):
 
         if self.first_iter:
             self.first_iter = False
-            DCSparseAccumulate.idx += 1
-            self.idx = DCSparseAccumulate.idx
+            DCSparseAdd.idx += 1
+            self.idx = DCSparseAdd.idx
             if self.dense_out or self.activation is not None:
                 self.prev_out = torch.zeros_like(val_a)
                 DCModule.temp_buffers.append(self.prev_out)
@@ -1285,7 +1285,7 @@ class DCSparseAccumulate(DCModule):
         self.mask_out = None
         self.prev_out = None
         self.first_iter = True
-        DCSparseAccumulate.idx = -1
+        DCSparseAdd.idx = -1
 
 
 class DCSparsify(DCModule):

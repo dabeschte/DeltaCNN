@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from deltacnn.sparse_layers import DCDensify, DCModule, DCConv2d, DCBatchNorm2d, DCSparseAccumulate, DCSparseActivation, DCSparseAdaptiveAveragePooling, DCSparsify
+from deltacnn.sparse_layers import DCDensify, DCModule, DCConv2d, DCBatchNorm2d, DCSparseAdd, DCSparseActivation, DCSparseAdaptiveAveragePooling, DCSparsify
 from torch.hub import load_state_dict_from_url
 
 
@@ -59,7 +59,7 @@ class DeltaCNN_InvertedResidual(DCModule):
 
         hidden_dim = int(round(inp * expand_ratio))
         self.use_res_connect = self.stride == 1 and inp == oup
-        self.sparse_add = DCSparseAccumulate() # added
+        self.sparse_add = DCSparseAdd() # added
 
         layers = []
         if expand_ratio != 1:
