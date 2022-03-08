@@ -86,7 +86,7 @@ class CNN(nn.Module):
 
 ```python
 ####### DeltaCNN
-import deltacnn.sparse_layers as deltacnn
+import deltacnn
 class CNN(deltacnn.DCModule):
     def __init__(self):
         self.sparsify = deltacnn.DCSparsify()
@@ -109,7 +109,7 @@ or simply:
 
 ```python
 ####### DeltaCNN simplified
-import deltacnn.sparse_layers as deltacnn
+import deltacnn
 class CNN(deltacnn.DCModule):
     def __init__(self):
         self.conv1 = deltacnn.DCConv2d(..., activation="relu")
@@ -139,7 +139,7 @@ class Normalize(nn.Module):
 
 ```python
 ####### DeltaCNN
-from deltacnn.sparse_layers import DCDensify, DCSparsify
+from deltacnn import DCDensify, DCSparsify
 class Normalize(DCModule):
     def __init__(self):
         self.densify = DCDensify()
