@@ -1,5 +1,7 @@
 # DeltaCNN
 
+[Paper (Arxiv)](https://www.arxiv.org) [Website](https://dabeschte.github.io/DeltaCNN)
+
 DeltaCNN caches intermediate feature maps from previous frames to accelerate inference of new frames by only processing updated pixels.
 DeltaCNN can be used as a drop-in replacement for most layers of a CNN by simply replacing the PyTorch layers with the DeltaCNN equivalent.
 Model weights and inference logic can be reused without the need for retraining.
@@ -194,6 +196,14 @@ for key in DCThreshold.t.keys():
 - As a starting point, we would suggest to use a small global threshold, or even 0 and to iteratively increase the threshold on the input until the accuracy decreases. Try to use a update mask dilation on the first layer together with high thresholds to compensate noise. Afterwards, try increasing the global threshold to the maximum that does not significantly reduce accuracy. Use this threshold as baseline when fine tuning individual truncation thresholds.
 - Fusing batch normalization layers together with convolutional layers can have a large impact on performance.
 
-## References
+## Cite
 
-TBA
+```
+@article{parger2022deltacnn,
+    title = {DeltaCNN: End-to-End CNN Inference of Sparse Frame Differences in Videos},
+    author = {Mathias Parger, Chengcheng Tang, Christopher D. Twigg, Cem Keskin, Robert Wang, Markus Steinberger},
+    journal = {CVPR 2022},
+    year = {2022},
+    month = jun
+}
+```
