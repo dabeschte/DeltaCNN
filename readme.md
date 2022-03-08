@@ -146,9 +146,9 @@ class Normalize(DCModule):
         self.sparsify = DCSparsify()
 
     def forward(self, x):
-    x = self.densify(x)
-    x = x / x.max()
-    return self.sparsify(x)
+        x = self.densify(x)
+        x = x / x.max()
+        return self.sparsify(x)
 ```
 
 ### 3.3 Weights and features memory layout
