@@ -1,13 +1,28 @@
 # DeltaCNN
 
-[Paper (Arxiv)](https://www.arxiv.org) [Website](https://dabeschte.github.io/DeltaCNN)
-
 DeltaCNN caches intermediate feature maps from previous frames to accelerate inference of new frames by only processing updated pixels.
 DeltaCNN can be used as a drop-in replacement for most layers of a CNN by simply replacing the PyTorch layers with the DeltaCNN equivalent.
 Model weights and inference logic can be reused without the need for retraining.
 All layers are implemented in CUDA, other devices are currently not supported.
 
-## 1) Setup
+A preprint of the paper is available on [Arxiv](https://www.arxiv.org).
+
+Find more information about the project on the [Project Website](https://dabeschte.github.io/DeltaCNN)
+
+## Table of Contents
+
+* [1 Setup](#1-setup)
+* [2 Example Project](#2-example-project)
+* [3 Using DeltaCNN in your project](#3-using-deltacnn-in-your-project)
+  * [3.1 Replacing Layers](#31-replacing-layers)
+  * [3.2 Perform custom operations not supported by DeltaCNN](#32-perform-custom-operations-not-supported-by-deltacnn)
+  * [3.3 Weights and features memory layout](#33-weights-and-features-memory-layout)
+  * [3.4 Custom thresholds](#34-custom-thresholds)
+  * [3.5 Tuning thresholds](#35-tuning-thresholds)
+* [Tips & Tricks](#tips--tricks)
+* [Cite](#cite)
+
+## 1 Setup
 
 ### Prerequsites
 
@@ -30,7 +45,7 @@ Please install these packages before installing DeltaCNN.
 - Run `python setup.py install --user`
    (This can take a few minutes)
 
-## 2) Example project
+## 2 Example project
 
 [example/mobilenetv2_webcam_example.py](example/mobilenetv2_webcam_example.py) contains a simple example that showcase all steps needed for replacing PyTorch's CNN layers by DeltaCNN.
 In this example, all steps required to port a network are highlighted with `# added` and `# replaced by`.
@@ -40,14 +55,14 @@ For the sake of simplicity, we avoided steps like fusing batch normalization lay
 
 The CNNs used in the paper can be found here `HRNet (TBA)`, `EfficientDet (TBA)`.
 
-## 3) Using DeltaCNN in your project
+## 3 Using DeltaCNN in your project
 
 Using DeltaCNN in your CNN project should in most cases be as easy as replacing all layers in the CNN with the DeltaCNN equivalent and adding a dense-to-sparse (DCSparsify()) layer at the beginning and a sparse-to-dense (DCDensify()) layer at the end.
-However, some things need to be considered when replacing the layers:
+However, some things need to be considered when replacing the layers.
 
-- **Nonlinear layers need unique instances for every location they are used in the model.**
+### 3.1 Replacing Layers
 
-  DeltaCNN caches input/output feature maps in each non-linear layer - create a single object for every use in the model. For example, this toy model can be converted as follows.
+  Nonlinear layers need unique instances for every location they are used in the model as they cache input/output feature maps at the current stage. To be safe, create a unique instance for every use of a layer in the model. For example, this toy model can be converted as follows.
 
 ```python
 ####### PyTorch
@@ -101,11 +116,12 @@ class CNN(deltacnn.DCModule):
         return self.conv3(x)
 ```
 
-- **Features are propagated together with an update mask**
+### 3.2 Perform custom operations not supported by DeltaCNN
 
-  DeltaCNN propagates only Delta updates between the layers. The output of a DeltaCNN layer consists of a Delta-Tensor and an update mask. Be careful when directly accessing theses values, as skipped pixels are not initialized and contain random values.
+  If you want to add layers not included in DeltaCNN or apply operations on the feature maps directly, be aware of the feature maps used in DeltaCNN.
+  DeltaCNN propagates only Delta updates between the layers. The output of a DeltaCNN layer consists of a Delta tensor and an update mask. Be careful when directly accessing these values, as skipped pixels are not initialized and contain random values.
 
-  If you apply nonlinear operations onto the feature maps, the safest way is to add a DCDensify() layer before, apply your operation and then convert the features back to Delta features using DCSparsify(). For example:
+  If you apply custom operations onto the feature maps, the safest way is to add a DCDensify() layer, apply your operation and then convert the features back to Delta features using DCSparsify(). For example:
 
 ```python
 ####### PyTorch
@@ -129,7 +145,7 @@ class Normalize(DCModule):
     return self.sparsify(x)
 ```
 
-- **Converting weights and features to correct memory layout**
+### 3.3 Weights and features memory layout
 
   DeltaCNN kernels only support `torch.channels_last` memory format. Furthermore, it expects a specific memory layout for the weights used in convolutional layers. Thus, after loading the weights from disk, process the filters before the first call. And be sure to convert the network input to channels last memory format.
 
@@ -148,7 +164,7 @@ for frame in video:
     out = model(frame)
  ```
 
-- **Using custom thresholds**
+### 3.4 Custom thresholds
 
   The easiest way to try DeltaCNN is to use a set a global threshold the `DCConv2d.diff_threshold` variable before instantiating the model. Good starting points are thresholds in the range between 0.05 to 0.3, but this can vary strongly depending on the network and the noise of the video. If video noise is an issue, specify a larger threshold for the DCSparsify layer using the diff_threshold parameter and compensate if using update mask dilation.
   For example: `DCSparsify(diff_threshold=0.3, dilation=15)`.
@@ -166,7 +182,7 @@ for frame_idx, frame in enumerate(video):
         DCThreshold.load_thresholds() 
  ```
 
-- **Tuning thresholds**
+### 3.5 Tuning thresholds
 
   On first call, all buffers are allocated in the size of the current input, the layers and logging layers are initialized and all truncation layers register their thresholds in the DCThreshold class. Optimizing the thresholds in a front-to-back manner can be done by iterating over all items stored in the ordered dictionary `DCThreshold.t`.
   For example:
