@@ -9,6 +9,10 @@ A preprint of the paper is available on [Arxiv](https://www.arxiv.org).
 
 Find more information about the project on the [Project Website](https://dabeschte.github.io/DeltaCNN)
 
+![](docs/images/h36m_pred.png) | ![](docs/images/h36m_heatmap.png) | ![](docs/images/mot16_pred.png) | ![](docs/images/mot16_heatmap.png)
+:-----:|:-----:|:-----:|:-----:
+Prediction | Updates | Prediction | Updates
+
 ## Table of Contents
 
 * [1 Setup](#1-setup)
@@ -100,6 +104,8 @@ class CNN(deltacnn.DCModule):
         x = self.relu2(self.conv2(x))
         return self.densify(self.relu3(self.conv3(x)))
 ```
+
+or simply:
 
 ```python
 ####### DeltaCNN simplified
