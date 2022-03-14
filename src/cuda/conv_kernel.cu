@@ -3090,8 +3090,8 @@ void deltacnn_dilation(scalar_t *input, scalar_t *output, scalar_t *filter, scal
         } else if (config.groups == dim.out.c && config.groups == dim.in.c) {
             if (config.stride[0] == 1 && config.stride[1] == 1) {
                 const int stride = 1;
-                const int pixelsPerBlockX = 4 / stride;
-                const int pixelsPerBlockY = 4 / stride;
+                const int pixelsPerBlockX = 4;
+                const int pixelsPerBlockY = 4;
                 const uint32_t threads = 128;
                 const int out_channels_per_block = threads;
                 uint32_t z_dim = divup(dim.out.c, out_channels_per_block);
@@ -3128,8 +3128,8 @@ void deltacnn_dilation(scalar_t *input, scalar_t *output, scalar_t *filter, scal
                 }
             } else if (config.stride[0] == 2 && config.stride[1] == 2) {
                 const int stride = 2;
-                const int pixelsPerBlockX = 6 / stride;
-                const int pixelsPerBlockY = 6 / stride;
+                const int pixelsPerBlockX = 3;
+                const int pixelsPerBlockY = 3;
                 const uint32_t threads = 128;
                 const int out_channels_per_block = threads;
                 uint32_t x = divup(dim.out.w, pixelsPerBlockX * config.dilation[1]) * config.dilation[1];
@@ -3242,7 +3242,83 @@ void deltacnn_dilation(scalar_t *input, scalar_t *output, scalar_t *filter, scal
     }
     else if (config.kernel_size[0] == 5 && config.kernel_size[1] == 5) {
         const int kernel_size = 5;
-        if (config.groups == dim.in.c && config.groups == dim.out.c) {
+        
+        if (config.groups == 1) {
+            if (config.stride[0] == 1 && config.stride[1] == 1) {
+                const int stride = 1;
+                const int pixelsPerBlockX = 5;
+                const int pixelsPerBlockY = 5;
+
+                uint32_t blocks = dim.batch_size * divup(dim.out.h, pixelsPerBlockY*config.dilation[0]) * divup(dim.out.w, pixelsPerBlockX*config.dilation[1]) * config.dilation[0]*config.dilation[1];
+                uint32_t x = divup(dim.out.w, pixelsPerBlockX * config.dilation[1]) * config.dilation[1];
+                uint32_t y = divup(dim.out.h, pixelsPerBlockY * config.dilation[0]) * config.dilation[0];
+                dim3 gridDim(x, y, dim.batch_size);
+        
+                if (dim.out.c > 256 || (blocks < 50 && dim.out.c >= 128)) {
+                    const int threads = 128;
+                    const int out_channels_per_block = threads;
+                    uint32_t z_dim = divup(dim.out.c, out_channels_per_block);
+                    dim3 gridDim(x,y,z_dim * dim.batch_size);
+                    deltacnn_standard_conv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                        input, output, filter, bias, mask, out_mask, dim, config);
+                }
+                else if (dim.out.c > 128) {
+                    const int threads = 256;
+                    const int out_channels_per_block = threads;
+                    deltacnn_standard_conv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                        input, output, filter, bias, mask, out_mask, dim, config);
+                } else if (dim.out.c > 64) {
+                    const int threads = 128;
+                    const int out_channels_per_block = threads;
+                    deltacnn_standard_conv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                        input, output, filter, bias, mask, out_mask, dim, config);
+                } else {
+                    const int threads = 64;
+                    const int out_channels_per_block = threads;
+                    deltacnn_standard_conv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                        input, output, filter, bias, mask, out_mask, dim, config);
+                }
+
+            } else if (config.stride[0] == 2 && config.stride[1] == 2) {
+                const int stride = 2;
+                const int pixelsPerBlockX = 5;
+                const int pixelsPerBlockY = 5;
+                
+                uint32_t blocks = dim.batch_size * divup(dim.out.h, pixelsPerBlockY*config.dilation[0]) * divup(dim.out.w, pixelsPerBlockX*config.dilation[1]) * config.dilation[0]*config.dilation[1];
+                uint32_t x = divup(dim.out.w, pixelsPerBlockX * config.dilation[1]) * config.dilation[1];
+                uint32_t y = divup(dim.out.h, pixelsPerBlockY * config.dilation[0]) * config.dilation[0];
+                dim3 gridDim(x, y, dim.batch_size);
+
+                if ((dim.out.c > 256 || (blocks < 50 && dim.out.c >= 128))) {
+                    const int threads = 128;
+                    const int out_channels_per_block = threads;
+                    uint32_t z_dim = divup(dim.out.c, out_channels_per_block);
+                    dim3 gridDim(x,y,z_dim*dim.batch_size);
+                    deltacnn_standard_conv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                        input, output, filter, bias, mask, out_mask, dim, config);
+                }
+                else if (dim.out.c > 128) {
+                    const int threads = 256;
+                    const int out_channels_per_block = threads;
+                    deltacnn_standard_conv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                        input, output, filter, bias, mask, out_mask, dim, config);
+                } else if (dim.out.c > 64) {
+                    const int threads = 128;
+                    const int out_channels_per_block = threads;
+                    deltacnn_standard_conv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                        input, output, filter, bias, mask, out_mask, dim, config);
+                } else {
+                    const int threads = 64;
+                    const int out_channels_per_block = threads;
+                    deltacnn_standard_conv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                        input, output, filter, bias, mask, out_mask, dim, config);
+                }
+            } else {
+                printf("Stride other than 1x1 and 2x2 not supported for 5x5 convolution, got %ix%i\n", config.stride[0], config.stride[1]);
+                throw "Strides other than 1x1 and 2x2 not supported for 5x5 convolution";
+            }
+        }
+        else if (config.groups == dim.in.c && config.groups == dim.out.c) {
             if (config.stride[0] == 1 && config.stride[1] == 1) {
                 const int stride = 1;
                 const int pixelsPerBlockX = 3;
@@ -3317,8 +3393,8 @@ void deltacnn_dilation(scalar_t *input, scalar_t *output, scalar_t *filter, scal
                 throw "Strides other than 1x1 and 2x2 not supported for 5x5 convolution";
             }
         } else {
-            printf("5x5 convolution only supports depth wise filters\n");
-            throw "5x5 convolution only supports depth wise filters";
+            printf("Groups must either be 1 or same as channels for 5x5 convolution\n");
+            throw "Groups must either be 1 or same as channels for 5x5 convolution";
         }
     }
     else if (config.kernel_size[0] == 7 && config.kernel_size[1] == 7) {
@@ -3670,11 +3746,87 @@ void deltacnn_hp_templates(half *input, half *output, half *filter, half* bias, 
         }
     } else if (config.kernel_size[0] == 5 && config.kernel_size[1] == 5) {
         const int kernel_size = 5;
-        if (config.groups == dim.in.c && config.groups == dim.out.c) {
+        if (config.groups == 1) {
             if (config.stride[0] == 1 && config.stride[1] == 1) {
                 const int stride = 1;
-                const int pixelsPerBlockX = 3 / stride;
-                const int pixelsPerBlockY = 3 / stride;
+                const int pixelsPerBlockX = 5;
+                const int pixelsPerBlockY = 5;
+                uint32_t blocks = dim.batch_size * divup(dim.out.h, pixelsPerBlockY*config.dilation[0]) * divup(dim.out.w, pixelsPerBlockX*config.dilation[1]) * config.dilation[0] * config.dilation[1];
+                
+                uint32_t x = divup(dim.out.w, pixelsPerBlockX * config.dilation[1]) * config.dilation[1];
+                uint32_t y = divup(dim.out.h, pixelsPerBlockY * config.dilation[0]) * config.dilation[0];
+                dim3 gridDim(x, y, dim.batch_size);
+        
+                if (dim.out.c > 256 || (blocks < 50 && dim.out.c >= 128)) {
+                    const int threads = 64;
+                    const int out_channels_per_block = threads * out_c_per_thread;
+                    uint32_t z_dim = divup(dim.out.c, out_channels_per_block);
+                    dim3 gridDim(x,y,z_dim*dim.batch_size);
+                    deltacnn_standard_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                        input, output, filter, bias, mask, out_mask, dim, config);
+                }
+                else if (dim.out.c > 128) {
+                    const int threads = 128;
+                    const int out_channels_per_block = threads * out_c_per_thread;
+                    deltacnn_standard_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                        input, output, filter, bias, mask, out_mask, dim, config);
+                } else if (dim.out.c > 64) {
+                    const int threads = 64;
+                    const int out_channels_per_block = threads * out_c_per_thread;
+                    deltacnn_standard_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                        input, output, filter, bias, mask, out_mask, dim, config);
+                } else {
+                    const int threads = 32;
+                    const int out_channels_per_block = threads * out_c_per_thread;
+                    deltacnn_standard_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                        input, output, filter, bias, mask, out_mask, dim, config);
+                }
+            } 
+            else if (config.stride[0] == 2 && config.stride[1] == 2) {
+                const int stride = 2;
+                const int pixelsPerBlockX = 5;
+                const int pixelsPerBlockY = 5;
+                uint32_t blocks = dim.batch_size * divup(dim.out.h, pixelsPerBlockY) * divup(dim.out.w, pixelsPerBlockX);
+                
+                uint32_t x = divup(dim.out.w, pixelsPerBlockX);
+                uint32_t y = divup(dim.out.h, pixelsPerBlockY);
+                dim3 gridDim(x, y, dim.batch_size);
+        
+                if ((dim.out.c > 256 || (blocks < 50 && dim.out.c >= 128))) {
+                    const int threads = 64;
+                    const int out_channels_per_block = threads * out_c_per_thread;
+                    uint32_t z_dim = divup(dim.out.c, out_channels_per_block);
+                    dim3 gridDim(x, y, z_dim * dim.batch_size);
+                    deltacnn_standard_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                        input, output, filter, bias, mask, out_mask, dim, config);
+                }
+                else if (dim.out.c > 128) {
+                    const int threads = 128;
+                    const int out_channels_per_block = threads * out_c_per_thread;
+                    deltacnn_standard_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                        input, output, filter, bias, mask, out_mask, dim, config);
+                } else if (dim.out.c > 64) {
+                    const int threads = 64;
+                    const int out_channels_per_block = threads * out_c_per_thread;
+                    deltacnn_standard_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                        input, output, filter, bias, mask, out_mask, dim, config);
+                } else {
+                    const int threads = 32;
+                    const int out_channels_per_block = threads * out_c_per_thread;
+                    deltacnn_standard_conv_hp<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+                        input, output, filter, bias, mask, out_mask, dim, config);
+                }
+            } 
+            else {
+                printf("Stride other than 1x1 and 2x2 not supported for 5x5 convolution, got %ix%i\n", config.stride[0], config.stride[1]);
+                throw "Strides other than 1x1 and 2x2 not supported for 5x5 convolution";
+            }
+        }
+        else if (config.groups == dim.in.c && config.groups == dim.out.c) {
+            if (config.stride[0] == 1 && config.stride[1] == 1) {
+                const int stride = 1;
+                const int pixelsPerBlockX = 3;
+                const int pixelsPerBlockY = 3;
                 uint32_t blocks = dim.batch_size * divup(dim.out.h, pixelsPerBlockY*config.dilation[0]) * divup(dim.out.w, pixelsPerBlockX*config.dilation[1]) * config.dilation[0] * config.dilation[1];
                 
                 uint32_t x = divup(dim.out.w, pixelsPerBlockX * config.dilation[1]) * config.dilation[1];
@@ -3708,8 +3860,8 @@ void deltacnn_hp_templates(half *input, half *output, half *filter, half* bias, 
             } 
             else if (config.stride[0] == 2 && config.stride[1] == 2) {
                 const int stride = 2;
-                const int pixelsPerBlockX = 3 / stride;
-                const int pixelsPerBlockY = 3 / stride;
+                const int pixelsPerBlockX = 2;
+                const int pixelsPerBlockY = 2;
                 uint32_t blocks = dim.batch_size * divup(dim.out.h, pixelsPerBlockY) * divup(dim.out.w, pixelsPerBlockX);
                 
                 uint32_t x = divup(dim.out.w, pixelsPerBlockX);
@@ -3746,8 +3898,8 @@ void deltacnn_hp_templates(half *input, half *output, half *filter, half* bias, 
                 throw "Strides other than 1x1 and 2x2 not supported for 5x5 convolution";
             }
         } else {
-            printf("5x5 convolution only supports depth wise filters\n");
-            throw "Strides other than 1x1 not supported for 1x1 convolution";
+            printf("Groups must either be 1 or same as channels for 5x5 convolution\n");
+            throw "Groups must either be 1 or same as channels for 5x5 convolution";
         }
     }
     else if (config.kernel_size[0] == 7 && config.kernel_size[1] == 7) {

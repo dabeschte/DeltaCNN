@@ -95,9 +95,9 @@ class CNN(deltacnn.DCModule):
         self.conv1 = deltacnn.DCConv2d(...)
         self.conv2 = deltacnn.DCConv2d(...)
         self.conv3 = deltacnn.DCConv2d(...)
-        self.relu1 = deltacnn.DCSparseActivation(activation="relu")
-        self.relu2 = deltacnn.DCSparseActivation(activation="relu")
-        self.relu3 = deltacnn.DCSparseActivation(activation="relu")
+        self.relu1 = deltacnn.DCActivation(activation="relu")
+        self.relu2 = deltacnn.DCActivation(activation="relu")
+        self.relu3 = deltacnn.DCActivation(activation="relu")
         self.densify = deltacnn.DCDensify()
 
     def forward(self, x):
@@ -218,6 +218,24 @@ for key in DCThreshold.t.keys():
 ```
 
   For better ways to tune the thresholds, please read the respective section in the DeltaCNN paper.
+
+## Supported operations
+
+DeltaCNN focuses on end-to-end sparse inference and therefore comes with common CNN layers besides convolutions.
+Yet, being a small research project, it does not provide all layers you might need or even support the provided layers in all possible configurations.
+If you want to use a layer that is not included in DeltaCNN, please open an issue.
+If you have some experience with CUDA, you can add new layers to DeltaCNN yourself - please consider creating a pull request to make DeltaCNN even better.
+
+As a rough overview, DeltaCNN features the following layers:
+
+* `DCSparsify` / `DCDensify`: convert dense features to sparse delta features + update mask and back
+* `DCConv2d`: Kernel sizes of 1x1, 3x3 and 5x5. All convolutions support striding of 1x1 and 2x2 as well as dilation of any factor and depthwise convolutions. Additionally, kernel size of 7x7 with a stride of 2x2 is also implemented for ResNet. All kernels can be used in float16 and float32 mode. However, as DeltaCNN does not support Tensor Cores (which cuDNN automatically uses in 16 bit mode), performance comparisons against cuDNN should be done in 32 bit mode for apples to apples comparisons.
+* `DCActivation`: `ReLU`, `ReLU6`, `LeakyReLU`, `Sigmoid` and `Swish`.
+* `DCMaxPooling`, `DCAdaptiveAveragePooling`: Average and maximum are supported for different kernel sizes.
+* `DCUpsamplingNearest2d`: By factors of 2, 4, 8 or 16.
+* `DCBatchNorm2d`: BatchNorm parameters are converted into scale and offset on initialization.
+* `DCAdd`: Adding two tensors (e.g. skip connection)
+* `DCConcatenate`: Concatenating two tensors along channel dimension (e.g. skip connection)
 
 ## Tips & Tricks
 

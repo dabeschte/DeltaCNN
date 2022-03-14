@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from deltacnn.sparse_layers import DCDensify, DCModule, DCConv2d, DCBatchNorm2d, DCSparseAdd, DCSparseActivation, DCSparseAdaptiveAveragePooling, DCSparsify
+from deltacnn.sparse_layers import DCDensify, DCModule, DCConv2d, DCBatchNorm2d, DCAdd, DCActivation, DCAdaptiveAveragePooling, DCSparsify
 from torch.hub import load_state_dict_from_url
 
 
@@ -42,7 +42,7 @@ class DeltaCNN_ConvBNReLU(nn.Sequential, DCModule):
             DCConv2d(in_planes, out_planes, kernel_size, stride, padding, groups=groups, bias=False),
             norm_layer(out_planes),
             # nn.ReLU6(inplace=True) # replaced by:
-            DCSparseActivation(activation="relu6", inplace=True)
+            DCActivation(activation="relu6", inplace=True)
         )
 
 
@@ -59,7 +59,7 @@ class DeltaCNN_InvertedResidual(DCModule):
 
         hidden_dim = int(round(inp * expand_ratio))
         self.use_res_connect = self.stride == 1 and inp == oup
-        self.sparse_add = DCSparseAdd() # added
+        self.sparse_add = DCAdd() # added
 
         layers = []
         if expand_ratio != 1:
@@ -152,7 +152,7 @@ class DeltaCNN_MobileNetV2(DCModule):
 
         self.sparsify =  DCSparsify() # added
         self.densify = DCDensify() # added
-        self.adaptive_avg_pooling = DCSparseAdaptiveAveragePooling(output_size=(1,1)) # added
+        self.adaptive_avg_pooling = DCAdaptiveAveragePooling(output_size=(1,1)) # added
 
         # building classifier
         self.classifier = nn.Sequential(

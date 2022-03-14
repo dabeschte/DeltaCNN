@@ -7,7 +7,7 @@ from torch.autograd.profiler import record_function
 from collections import OrderedDict
 from enum import Enum
 
-from deltacnn.cuda_kernels import sparse_conv, sparse_deconv, \
+from deltacnn.cuda_kernels import sparse_concatenate, sparse_conv, sparse_deconv, \
     sparse_activation, sparsify, sparse_add_tensors, sparse_upsample, sparse_pooling, sparse_add_to_dense_tensor, sparse_mul_add
 from deltacnn.filter_conversion import convert_filter_out_channels_last, convert_half_filter
 
@@ -305,13 +305,13 @@ class DCConv2d(nn.Conv2d, DCModule):
         self.use_logging = use_logging
 
         self.densify_layer: DCDensify = None
-        self.activation_layer: DCSparseActivation = None
+        self.activation_layer: DCActivation = None
         if self.dense_out:
             self.densify_layer = DCDensify(activation=activation, name=self.name)
         elif self.activation is not None:
-            self.activation_layer = DCSparseActivation(self.name, delta_threshold=delta_threshold, activation=activation)
+            self.activation_layer = DCActivation(self.name, delta_threshold=delta_threshold, activation=activation)
         elif self.logging_enabled():
-            self.activation_layer = DCSparseActivation(self.name, inplace=False, delta_threshold=-1, activation=None, truncation_mode=DCTruncation.none)
+            self.activation_layer = DCActivation(self.name, inplace=False, delta_threshold=-1, activation=None, truncation_mode=DCTruncation.none)
 
         if self.logging_enabled():
             self.computation_logger = ComputationsLogger(name=self.name)
@@ -713,13 +713,13 @@ class DCConvTranspose2d(nn.ConvTranspose2d, DCModule):
         self.use_logging = use_logging
 
         self.densify_layer: DCDensify = None
-        self.activation_layer: DCSparseActivation = None
+        self.activation_layer: DCActivation = None
         if self.dense_out:
             self.densify_layer = DCDensify(activation=activation, name=self.name)
         elif self.activation is not None:
-            self.activation_layer = DCSparseActivation(self.name, delta_threshold=delta_threshold, activation=activation)
+            self.activation_layer = DCActivation(self.name, delta_threshold=delta_threshold, activation=activation)
         elif self.logging_enabled():
-            self.activation_layer = DCSparseActivation(self.name, inplace=False, delta_threshold=-1, activation=None, truncation_mode=DCTruncation.none)
+            self.activation_layer = DCActivation(self.name, inplace=False, delta_threshold=-1, activation=None, truncation_mode=DCTruncation.none)
 
         if self.logging_enabled():
             self.computation_logger = ComputationsLogger(name=self.name)
@@ -1081,11 +1081,11 @@ class DCConvTranspose2d(nn.ConvTranspose2d, DCModule):
             self.process_filters_single()
 
 
-class DCSparseAdd(DCModule):
+class DCAdd(DCModule):
     idx = -1
 
     def __init__(self, activation: str = None, dense_out=False, weight_a=None, weight_b=None, name=""):
-        super(DCSparseAdd, self).__init__()
+        super(DCAdd, self).__init__()
         self.name = name
         self.dense_out = dense_out
         self.activation, self.activation_int = convert_activation_string(activation)
@@ -1125,8 +1125,8 @@ class DCSparseAdd(DCModule):
 
         if self.first_iter:
             self.first_iter = False
-            DCSparseAdd.idx += 1
-            self.idx = DCSparseAdd.idx
+            DCAdd.idx += 1
+            self.idx = DCAdd.idx
             if self.dense_out or self.activation is not None:
                 self.prev_out = torch.zeros_like(val_a)
                 DCModule.temp_buffers.append(self.prev_out)
@@ -1177,7 +1177,19 @@ class DCSparseAdd(DCModule):
         self.mask_out = None
         self.prev_out = None
         self.first_iter = True
-        DCSparseAdd.idx = -1
+        DCAdd.idx = -1
+
+
+class DCConcatenate(DCModule):
+    def __init__(self,  name=""):
+        super(DCConcatenate, self).__init__()
+        self.name = name
+
+    def forward(self, a, b):
+        if type(a) == torch.Tensor:
+            return torch.cat((a, b), dim=1)
+            
+        return sparse_concatenate(a, b)
 
 
 class DCSparsify(DCModule):
@@ -1319,14 +1331,13 @@ class DCDensify(DCModule):
         self.prev_out = None
 
 
-class DCSparseUpsample(DCModule):
+class DCUpsamplingNearest2d(DCModule):
     idx = -1
 
-    def __init__(self, scale_factor=2, mode="nearest", name=""):
-        super(DCSparseUpsample, self).__init__()
+    def __init__(self, scale_factor=2, name=""):
+        super(DCUpsamplingNearest2d, self).__init__()
         self.name = name
         self.scale_factor = int(scale_factor)
-        assert mode == "nearest"
         self.idx = -1
         self.out = None
         self.torch_upsample = nn.UpsamplingNearest2d(scale_factor=scale_factor)
@@ -1346,12 +1357,12 @@ class DCSparseUpsample(DCModule):
         self.out = None
 
 
-class DCSparseActivation(DCModule):
+class DCActivation(DCModule):
     idx = -1
     truncation_default = DCTruncation.max
 
     def __init__(self, name="", inplace=True, delta_threshold=None, activation="relu", truncation_mode:DCTruncation=None):
-        super(DCSparseActivation, self).__init__()
+        super(DCActivation, self).__init__()
         self.name = name
         self.idx = -1
         self.prev_out = None
@@ -1360,7 +1371,7 @@ class DCSparseActivation(DCModule):
         self.activation, self.activation_int = convert_activation_string(activation)
         self.delta_threshold = delta_threshold if delta_threshold is not None else DCThreshold.t_default
         self.first_iter = True
-        self.truncation_mode = truncation_mode if truncation_mode is not None else DCSparseActivation.truncation_default
+        self.truncation_mode = truncation_mode if truncation_mode is not None else DCActivation.truncation_default
 
     def forward(self, input):
         if type(input) == torch.Tensor and DCConv2d.backend != DCBackend.delta_cudnn:
@@ -1376,8 +1387,8 @@ class DCSparseActivation(DCModule):
             if self not in DCThreshold.t:
                 DCThreshold.set(self, self.delta_threshold)
             if self.idx < 0:
-                DCSparseActivation.idx += 1
-                self.idx = DCSparseActivation.idx
+                DCActivation.idx += 1
+                self.idx = DCActivation.idx
             self.prev_out = val.clone()
             self.out_truncated = torch.zeros_like(val)
             DCModule.temp_buffers.append(self.prev_out)
@@ -1409,10 +1420,10 @@ class DCSparseActivation(DCModule):
         self.prev_out = None
         self.out_truncated = None
         self.first_iter = True
-        DCSparseActivation.idx = -1
+        DCActivation.idx = -1
 
 
-class DCSparseMaxPooling(nn.MaxPool2d, DCModule):
+class DCMaxPooling(nn.MaxPool2d, DCModule):
     def __init__(self,
                  kernel_size: _size_2_t,
                  stride: _size_2_t = (1, 1),
@@ -1461,7 +1472,7 @@ class DCSparseMaxPooling(nn.MaxPool2d, DCModule):
         self.prev_in = None
 
 
-class DCSparseAdaptiveAveragePooling(nn.AdaptiveAvgPool2d, DCModule):
+class DCAdaptiveAveragePooling(nn.AdaptiveAvgPool2d, DCModule):
     def __init__(self,
                  output_size: _size_2_t = None
                  ):

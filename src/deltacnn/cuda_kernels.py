@@ -147,12 +147,12 @@ def sparsify(input, prev_in, delta, mask, threshold):
     deltacnn_prepare_diff_mask_wrapper(input, prev_in, delta, mask, threshold)
 
 
-# @record_function("DCSparseAddTensors")
+# @record_function("DCAddTensors")
 def sparse_add_tensors(a, b, prev_out, out, mask_a, mask_b, mask_out, weight_a, weight_b, activation, dense_out):
     sparse_add_tensors_wrapper(a, b, prev_out, out, mask_a, mask_b, mask_out, weight_a, weight_b, activation, dense_out)
 
 
-# @record_function("DCSparseAddToDenseTensor")
+# @record_function("DCAddToDenseTensor")
 def sparse_add_to_dense_tensor(a, b, mask_a, activation=0):
     sparse_add_to_dense_tensor_wrapper(a, b, mask_a, activation)
 
@@ -180,7 +180,7 @@ def sparse_upsample(input, mask_in, scale, out=None):
     return out, mask_out
 
 
-# @record_function("DCSparseConcatenate")
+# @record_function("DCConcatenate")
 def sparse_concatenate(a, b, out=None):
     a, mask_a = a
     b, mask_b = b
