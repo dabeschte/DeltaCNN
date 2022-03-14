@@ -53,7 +53,7 @@ def differentiable_threshold(input_activated, input, truncated, prev_input, thre
     elif mode == "sigmoid":
         soft_mask = abs_active_input - threshold
         soft_mask = torch.max(soft_mask, dim=1, keepdim=True)[0]
-        soft_mask *= DCConv2d.diff_threshold_factor
+        soft_mask *= DCThreshold.t_default_factor
         soft_mask = torch.sigmoid(soft_mask)
         soft_mask = torch.repeat_interleave(soft_mask, repeats=input.shape[1], dim=1)
         inv_soft_mask = 1.0 - soft_mask
@@ -67,7 +67,7 @@ def differentiable_threshold(input_activated, input, truncated, prev_input, thre
     elif mode == "sigmoid_norm":
         soft_mask = torch.norm(abs_active_input, dim=1, keepdim=True)
         soft_mask = soft_mask - threshold
-        soft_mask *= DCConv2d.diff_threshold_factor
+        soft_mask *= DCThreshold.t_default_factor
         soft_mask = torch.sigmoid(soft_mask)
         soft_mask = torch.repeat_interleave(soft_mask, repeats=input.shape[1], dim=1)
         inv_soft_mask = 1.0 - soft_mask
@@ -83,7 +83,6 @@ class DCBackend(Enum):
     cudnn = 0
     deltacnn = 1
     delta_cudnn = 2
-    cbinfer = 3
 
     @classmethod
     def parse_string(cls, x):
@@ -92,8 +91,6 @@ class DCBackend(Enum):
             return DCBackend.cudnn
         if x == "deltacnn":
             return DCBackend.deltacnn
-        if x == "cbinfer":
-            return DCBackend.cbinfer
         if x == "delta_cudnn":
             return DCBackend.delta_cudnn
         raise Exception(f"invalid backend {x}")
@@ -120,6 +117,7 @@ class DCTruncation(Enum):
 
 
 class DCThreshold:
+    t_default = 0.0
     t = OrderedDict()
     path = None
     initialized = False
@@ -258,19 +256,16 @@ def to_tuple(*args) -> _size_2_t:
 
 
 class DCConv2d(nn.Conv2d, DCModule):
-    diff_threshold = 0.0
     backend = DCBackend.deltacnn
     conv_idx = -1
-    in_mask = None
     out_masks = []
     use_logging = False
     n_sparse_inputs = 0
     n_dense_inputs = 0
     n_sparse_output = 0
     n_dense_output = 0
-    truncation_mode = DCTruncation.max
     store_out_masks = False
-    diff_threshold_factor = 100
+    delta_threshold_factor = 100
     flops_sum = 0
     measure_flops = False
 
@@ -285,7 +280,7 @@ class DCConv2d(nn.Conv2d, DCModule):
             groups: int = 1,
             bias: bool = True,
             padding_mode: str = 'zeros',
-            diff_threshold: float = None,
+            delta_threshold: float = None,
             name: str = None,
             activation: str = None,
             dense_out=False,
@@ -298,7 +293,7 @@ class DCConv2d(nn.Conv2d, DCModule):
         super(DCConv2d, self).__init__(in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias, padding_mode)
         self.prev_in = None
         self.prev_out = None
-        self.diff_threshold = diff_threshold if diff_threshold is not None else DCConv2d.diff_threshold
+        self.delta_threshold = delta_threshold if delta_threshold is not None else DCThreshold.t_default
         self.acc_err = None
         self.name = name
         self.activation = None
@@ -314,9 +309,9 @@ class DCConv2d(nn.Conv2d, DCModule):
         if self.dense_out:
             self.densify_layer = DCDensify(activation=activation, name=self.name)
         elif self.activation is not None:
-            self.activation_layer = DCSparseActivation(self.name, diff_threshold=diff_threshold, activation=activation)
+            self.activation_layer = DCSparseActivation(self.name, delta_threshold=delta_threshold, activation=activation)
         elif self.logging_enabled():
-            self.activation_layer = DCSparseActivation(self.name, inplace=False, diff_threshold=-1, activation=None, truncation_mode=DCTruncation.none)
+            self.activation_layer = DCSparseActivation(self.name, inplace=False, delta_threshold=-1, activation=None, truncation_mode=DCTruncation.none)
 
         if self.logging_enabled():
             self.computation_logger = ComputationsLogger(name=self.name)
@@ -334,7 +329,6 @@ class DCConv2d(nn.Conv2d, DCModule):
         self.out_shape = []
         self.kwargs = kwargs
         self.in_shape = None
-        self._cbinfer = None
         assert kwargs.get('leaky_relu_negative_slope', 0.1) == 0.1, "Leaky ReLU implementation uses hard coded negative slope of 0.1"
 
     def logging_enabled(self):
@@ -366,7 +360,7 @@ class DCConv2d(nn.Conv2d, DCModule):
         # TODO fix tuned thresholds so that we can remove self.dense_out here. does not make sense to use at all
         if (self.activation is not None or self.dense_out or (self.dense_in and not (self.backend == DCBackend.delta_cudnn))) \
                 and not self.backend == DCBackend.cudnn:
-            DCThreshold.set(self, self.diff_threshold)
+            DCThreshold.set(self, self.delta_threshold)
 
         if self.dense_in:
             DCConv2d.n_dense_inputs += 1
@@ -444,9 +438,6 @@ class DCConv2d(nn.Conv2d, DCModule):
         elif self.backend == DCBackend.delta_cudnn:
             assert (len(self.padding) == 2)
             return self._forward_delta_cudnn(input, first_iter)
-        elif self.backend == DCBackend.cbinfer:
-            assert (len(self.padding) == 2)
-            return self._forward_cbinfer(input, first_iter)
         else:
             if self.logging_enabled():
                 return self._forward_delta_conv_debug(input, first_iter)
@@ -536,56 +527,6 @@ class DCConv2d(nn.Conv2d, DCModule):
             elif self.activation is None and not self.dense_out:
                 self.prev_out += out
             self.output_logger(self.prev_out)
-
-        return out
-
-    def _supported_by_cbinfer(self):
-        return self.dilation == (1, 1) and self.stride == (1, 1) and self.bias is not None and self.groups == 1
-
-    def _forward_cbinfer(self, input, first_iter):
-        if self._supported_by_cbinfer():
-            if first_iter:
-                from pycbinfer import CBConv2d
-                self._cbinfer = CBConv2d(self, self.diff_threshold, allow_multiple_resolutions=self.kwargs.get("ignore_changing_res", False))
-                self._cbinfer.withReLU = self.activation_int == 1
-                if self.conv_idx == 0:
-                    DCConv2d.layer_stats = {'cbinfer': 0, 'cudnn': 0}
-                DCConv2d.layer_stats['cbinfer'] += 1
-
-            self._cbinfer.threshold = DCThreshold.get(self, 0.0)
-            out = self._cbinfer(input)
-
-            if DCConv2d.measure_flops:
-                mask = (torch.max((input - self._cbinfer.prevInput).abs(), dim=1, keepdim=True)[0] > self._cbinfer.threshold).float()
-                out_mask = torch.conv2d(mask, torch.ones_like(self.weight[:1,:1]), None, self.stride, self.padding, self.dilation, self.groups)
-                n_updated = out_mask.sum().int().item()
-                DCConv2d.flops_sum += n_updated * self.weight.numel()
-
-            if first_iter:
-                DCModule.temp_buffers.append(self._cbinfer.prevInput)
-                DCModule.temp_buffers.append(self._cbinfer.prevOutput)
-
-            if self.activation_int > 1:
-                # only if the activation is not ReLU, use built-in
-                out = self.activation(out)
-        else:
-            if first_iter:
-                if self.conv_idx == 0:
-                    DCConv2d.layer_stats = {}
-                    DCConv2d.layer_stats = {'cbinfer': 0, 'cudnn': 0}
-                DCConv2d.layer_stats['cudnn'] += 1
-
-            out = self._forward_cudnn(input, first_iter)
-
-            if DCConv2d.measure_flops:
-                n_updated = out[:,:1].numel()
-                DCConv2d.flops_sum += n_updated * self.weight.numel()
-
-
-            if first_iter:
-                # still count them in, because it would otherwise be uncomparable
-                DCModule.temp_buffers.append(input.clone())
-                DCModule.temp_buffers.append(out.clone())
 
         return out
 
@@ -708,8 +649,6 @@ class DCConv2d(nn.Conv2d, DCModule):
         DCConv2d.conv_idx = -1
         DCConv2d.n_dense_output, DCConv2d.n_sparse_output = 0, 0
         DCConv2d.n_dense_inputs, DCConv2d.n_sparse_inputs = 0, 0
-        if self._cbinfer is not None:
-            self._cbinfer.clearMemory()
 
     def process_filters_half(self):
         self.orig_weights = self.weight.data.clone()
@@ -747,7 +686,7 @@ class DCConvTranspose2d(nn.ConvTranspose2d, DCModule):
             bias: bool = True,
             dilation: _size_2_t = 1,
             padding_mode: str = 'zeros',
-            diff_threshold: float = None,
+            delta_threshold: float = None,
             name: str = None,
             activation: str = None,
             store_prev_in=False,
@@ -761,7 +700,7 @@ class DCConvTranspose2d(nn.ConvTranspose2d, DCModule):
         super(DCConvTranspose2d, self).__init__(in_channels, out_channels, kernel_size, stride, padding, output_padding, groups, bias, dilation, padding_mode)
         self.prev_in = None
         self.prev_out = None
-        self.diff_threshold = diff_threshold if diff_threshold is not None else DCConv2d.diff_threshold
+        self.delta_threshold = delta_threshold if delta_threshold is not None else DCThreshold.t_default
         self.acc_err = None
         self.name = name
         self.activation = None
@@ -778,9 +717,9 @@ class DCConvTranspose2d(nn.ConvTranspose2d, DCModule):
         if self.dense_out:
             self.densify_layer = DCDensify(activation=activation, name=self.name)
         elif self.activation is not None:
-            self.activation_layer = DCSparseActivation(self.name, diff_threshold=diff_threshold, activation=activation)
+            self.activation_layer = DCSparseActivation(self.name, delta_threshold=delta_threshold, activation=activation)
         elif self.logging_enabled():
-            self.activation_layer = DCSparseActivation(self.name, inplace=False, diff_threshold=-1, activation=None, truncation_mode=DCTruncation.none)
+            self.activation_layer = DCSparseActivation(self.name, inplace=False, delta_threshold=-1, activation=None, truncation_mode=DCTruncation.none)
 
         if self.logging_enabled():
             self.computation_logger = ComputationsLogger(name=self.name)
@@ -797,7 +736,6 @@ class DCConvTranspose2d(nn.ConvTranspose2d, DCModule):
         self.out_shape = []
         self.kwargs = kwargs
         self.in_shape = None
-        self._cbinfer = None
         assert kwargs.get('leaky_relu_negative_slope', 0.1) == 0.1, "Leaky ReLU implementation uses hard coded negative slope of 0.1"
 
 
@@ -830,7 +768,7 @@ class DCConvTranspose2d(nn.ConvTranspose2d, DCModule):
         # TODO fix tuned thresholds so that we can remove self.dense_out here. does not make sense to use at all
         if (self.activation is not None or self.dense_out or (self.dense_in and not (self.backend == DCBackend.delta_cudnn))) \
                 and not self.backend == DCBackend.cudnn:
-           DCThreshold.set(self, self.diff_threshold)
+           DCThreshold.set(self, self.delta_threshold)
 
         if self.dense_in:
             DCConv2d.n_dense_inputs += 1
@@ -909,9 +847,6 @@ class DCConvTranspose2d(nn.ConvTranspose2d, DCModule):
         elif self.backend == DCBackend.delta_cudnn:
             assert (len(self.padding) == 2)
             return self._forward_delta_cudnn(input, first_iter)
-        elif self.backend == DCBackend.cbinfer:
-            assert (len(self.padding) == 2)
-            return self._forward_cbinfer(input, first_iter)
         else:
             if self.logging_enabled():
                 return self._forward_delta_conv_debug(input, first_iter)
@@ -1000,50 +935,6 @@ class DCConvTranspose2d(nn.ConvTranspose2d, DCModule):
             elif self.activation is None and not self.dense_out:
                 self.prev_out += out
             self.output_logger(self.prev_out)
-
-        return out
-
-    def _supported_by_cbinfer(self):
-        return self.dilation == (1, 1) and self.stride == (1, 1) and self.bias is not None and self.groups == 1
-
-    def _forward_cbinfer(self, input, first_iter):
-        if self._supported_by_cbinfer():
-            if first_iter:
-                from pycbinfer import CBConv2d
-                self._cbinfer = CBConv2d(self, self.diff_threshold, allow_multiple_resolutions=self.kwargs.get("ignore_changing_res", False))
-                
-                self._cbinfer.withReLU = self.activation_int == 1
-                if self.conv_idx == 0:
-                    DCConv2d.layer_stats = {}
-                    DCConv2d.layer_stats['cbinfer'] = 1
-                    DCConv2d.layer_stats['cudnn'] = 0
-                DCConv2d.layer_stats['cbinfer'] += 1
-
-            self._cbinfer.threshold = DCThreshold.get(self, 0.0)
-            out = self._cbinfer(input)
-
-            if first_iter:
-                DCModule.temp_buffers.append(self._cbinfer.prevInput)
-                DCModule.temp_buffers.append(self._cbinfer.prevOutput)
-
-            if self.activation_int > 1:
-                # only if the activation is not ReLU, use built-in
-                out = self.activation(out)
-        else:
-            if first_iter:
-                if self.conv_idx == 0:
-                    DCConv2d.layer_stats = {}
-                    DCConv2d.layer_stats['cbinfer'] = 0
-                    DCConv2d.layer_stats['cudnn'] = 1
-                DCConv2d.layer_stats['cudnn'] += 1
-
-            out = self._forward_cudnn(input, first_iter)
-
-
-            if first_iter:
-                # still count them in, because it would otherwise be uncomparable
-                DCModule.temp_buffers.append(input.clone())
-                DCModule.temp_buffers.append(out.clone())
 
         return out
 
@@ -1166,8 +1057,6 @@ class DCConvTranspose2d(nn.ConvTranspose2d, DCModule):
         DCConv2d.conv_idx = -1
         DCConv2d.n_dense_output, DCConv2d.n_sparse_output = 0, 0
         DCConv2d.n_dense_inputs, DCConv2d.n_sparse_inputs = 0, 0
-        if self._cbinfer is not None:
-            self._cbinfer.clearMemory()
 
     def process_filters_half(self):
         self.orig_weights = self.weight.data.clone()
@@ -1294,12 +1183,12 @@ class DCSparseAdd(DCModule):
 class DCSparsify(DCModule):
     idx = -1
 
-    def __init__(self, name="", diff_threshold=None, dilation=-1):
+    def __init__(self, name="", delta_threshold=None, dilation=-1):
         super(DCSparsify, self).__init__()
         self.name = name
         self.prev_in = None
         self.idx = -1
-        self.diff_threshold = diff_threshold if diff_threshold is not None else DCConv2d.diff_threshold
+        self.delta_threshold = delta_threshold if delta_threshold is not None else DCThreshold.t_default
         self.dilation = dilation
         self.frame_idx = -1
         self.mask = None
@@ -1313,7 +1202,7 @@ class DCSparsify(DCModule):
 
         if first_iter:
             if self not in DCThreshold.t:
-                DCThreshold.set(self, self.diff_threshold)
+                DCThreshold.set(self, self.delta_threshold)
             DCSparsify.idx += 1
             self.idx = DCSparsify.idx
             self.prev_in = input.clone()
@@ -1459,8 +1348,9 @@ class DCSparseUpsample(DCModule):
 
 class DCSparseActivation(DCModule):
     idx = -1
+    truncation_default = DCTruncation.max
 
-    def __init__(self, name="", inplace=True, diff_threshold=None, activation="relu"):
+    def __init__(self, name="", inplace=True, delta_threshold=None, activation="relu", truncation_mode:DCTruncation=None):
         super(DCSparseActivation, self).__init__()
         self.name = name
         self.idx = -1
@@ -1468,8 +1358,9 @@ class DCSparseActivation(DCModule):
         self.inplace = inplace
         self.out_truncated = None
         self.activation, self.activation_int = convert_activation_string(activation)
-        self.diff_threshold = diff_threshold if diff_threshold is not None else DCConv2d.diff_threshold
+        self.delta_threshold = delta_threshold if delta_threshold is not None else DCThreshold.t_default
         self.first_iter = True
+        self.truncation_mode = truncation_mode if truncation_mode is not None else DCSparseActivation.truncation_default
 
     def forward(self, input):
         if type(input) == torch.Tensor and DCConv2d.backend != DCBackend.delta_cudnn:
@@ -1483,7 +1374,7 @@ class DCSparseActivation(DCModule):
         if self.first_iter:
             self.first_iter = False
             if self not in DCThreshold.t:
-                DCThreshold.set(self, self.diff_threshold)
+                DCThreshold.set(self, self.delta_threshold)
             if self.idx < 0:
                 DCSparseActivation.idx += 1
                 self.idx = DCSparseActivation.idx
@@ -1508,7 +1399,7 @@ class DCSparseActivation(DCModule):
         if not self.inplace:
             val = val.clone()
             mask = mask.clone()
-        sparse_activation(val, self.prev_out, self.out_truncated, mask, threshold, self.activation_int, DCConv2d.truncation_mode.value)
+        sparse_activation(val, self.prev_out, self.out_truncated, mask, threshold, self.activation_int, self.truncation_mode.value)
 
         return val, mask
 

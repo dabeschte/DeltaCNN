@@ -13,7 +13,7 @@
 # This example uses weights pretrained on ImageNet. 
 # Also, the webcam is used as video input to avoid having to download videos and for being able to play 
 # around with the camera.
-# Adjust the diff_threshold to see how it affects the predictions.
+# Adjust the delta_threshold to see how it affects the predictions.
 #
 ########################################################################################################
 
@@ -21,7 +21,7 @@
 
 import torch
 from torch import nn
-from deltacnn.sparse_layers import DCBackend, DCConv2d
+from deltacnn.sparse_layers import DCBackend, DCConv2d, DCThreshold
 from mobilenet_original import mobilenet_v2
 from mobilenet_deltacnn import DeltaCNN_mobilenet_v2
 
@@ -110,6 +110,6 @@ if __name__ == "__main__":
         exit(-1)
 
     # using a low default threshold of 0.05. play around with this value to see how it affects performance and accuracy.
-    DCConv2d.diff_threshold = 0.05
+    DCThreshold.t_default = 0.05
     DCConv2d.backend = DCBackend.deltacnn
     test()

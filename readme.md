@@ -32,12 +32,12 @@ Prediction | Updates | Prediction | Updates
 
 DeltaCNN depends on:
 
-- [Python](https://www.python.org/downloads/) / [Anaconda](https://www.anaconda.com/)
-- C++ compiler
-  - Windows: Visual Studio (msvc) with "Desktop development for C++"
-  - Linux: gcc/g++
-- [CUDA Toolkit 11.3](https://developer.nvidia.com/cuda-11.3.0-download-archive)
-- [PyTorch v1.10.2](https://pytorch.org/get-started/locally/)
+* [Python](https://www.python.org/downloads/) / [Anaconda](https://www.anaconda.com/)
+* C++ compiler
+  * Windows: Visual Studio (msvc) with "Desktop development for C++"
+  * Linux: gcc/g++
+* [CUDA Toolkit 11.3](https://developer.nvidia.com/cuda-11.3.0-download-archive)
+* [PyTorch v1.10.2](https://pytorch.org/get-started/locally/)
    (pip installation command: `pip3 install torch==1.10.2+cu113 torchvision==0.11.3+cu113 torchaudio===0.10.2+cu113 -f https://download.pytorch.org/whl/cu113/torch_stable.html`)
    (anaconda installation command: `conda install pytorch torchvision torchaudio cudatoolkit=11.3 -c pytorch`)
 
@@ -45,8 +45,8 @@ Please install these packages before installing DeltaCNN.
 
 ### Install DeltaCNN Framework
 
-- Navigate to DeltaCNN root directory
-- Run `python setup.py install --user`
+* Navigate to DeltaCNN root directory
+* Run `python setup.py install --user`
    (This can take a few minutes)
 
 ## 2 Example project
@@ -54,7 +54,7 @@ Please install these packages before installing DeltaCNN.
 [example/mobilenetv2_webcam_example.py](example/mobilenetv2_webcam_example.py) contains a simple example that showcase all steps needed for replacing PyTorch's CNN layers by DeltaCNN.
 In this example, all steps required to port a network are highlighted with `# added` and `# replaced by`.
 In the main file, we load the original CNN, and the DeltaCNN variant, and run both on webcam video input.
-Play around with the DCConv2d.diff_threshold to see how the performance and accuracy change with different values.
+Play around with the DCThreshold.t_default to see how the performance and accuracy change with different values.
 For the sake of simplicity, we avoided steps like fusing batch normalization layers together with convolutional layers or tuning thresholds for each layer individually.
 
 The CNNs used in the paper can be found here `HRNet (TBA)`, `EfficientDet (TBA)`.
@@ -178,8 +178,8 @@ for frame in video:
 
 ### 3.4 Custom thresholds
 
-  The easiest way to try DeltaCNN is to use a set a global threshold the `DCConv2d.diff_threshold` variable before instantiating the model. Good starting points are thresholds in the range between 0.05 to 0.3, but this can vary strongly depending on the network and the noise of the video. If video noise is an issue, specify a larger threshold for the DCSparsify layer using the diff_threshold parameter and compensate if using update mask dilation.
-  For example: `DCSparsify(diff_threshold=0.3, dilation=15)`.
+  The easiest way to try DeltaCNN is to use a set a global threshold the `DCThreshold.t_default` variable before instantiating the model. Good starting points are thresholds in the range between 0.05 to 0.3, but this can vary strongly depending on the network and the noise of the video. If video noise is an issue, specify a larger threshold for the DCSparsify layer using the delta_threshold parameter and compensate if using update mask dilation.
+  For example: `DCSparsify(delta_threshold=0.3, dilation=15)`.
   Thresholds can also be loaded from json files containing the threshold index as key.
   Set the path to the thresholds using `DCThreshold.path = <path>` and load the thresholds after predicting the first frame.
   For example:
@@ -201,7 +201,7 @@ for frame_idx, frame in enumerate(video):
 
 ```python
 sequence = load_video()
-DCConv2d.diff_threshold = 0.0
+DCThreshold.t_default = 0.0
 model = init_model()
 ref_loss = calc_loss(model, sequence)
 max_per_layer_loss_increase = 1.001 # some random number
@@ -221,8 +221,11 @@ for key in DCThreshold.t.keys():
 
 ## Tips & Tricks
 
-- As a starting point, we would suggest to use a small global threshold, or even 0 and to iteratively increase the threshold on the input until the accuracy decreases. Try to use a update mask dilation on the first layer together with high thresholds to compensate noise. Afterwards, try increasing the global threshold to the maximum that does not significantly reduce accuracy. Use this threshold as baseline when fine tuning individual truncation thresholds.
-- Fusing batch normalization layers together with convolutional layers can have a large impact on performance.
+* As a starting point, we would suggest to use a small global threshold, or even 0 and to iteratively increase the threshold on the input until the accuracy decreases. Try to use a update mask dilation on the first layer together with high thresholds to compensate noise. Afterwards, try increasing the global threshold to the maximum that does not significantly reduce accuracy. Use this threshold as baseline when fine tuning individual truncation thresholds.
+
+* Fusing batch normalization layers together with convolutional layers can have a large impact on performance.
+
+* Switch between DeltaCNN and cuDNN inference mode without changing the layers by setting `DCConv2d.backend` to `DCBackend.deltacnn` or `DCBackend.cudnn`.
 
 ## Cite
 
