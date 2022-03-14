@@ -407,29 +407,19 @@ __device__ __forceinline__ half2 hactivation_selector2(half2 x, int mode) {
 
 
 template <typename scalar_t = float, int activation>
-__device__ void activate_no_truncation(scalar_t *delta_px, scalar_t *prev_input_px, uint32_t *mask_px, Dimensions dim, float threshold)
+__device__ void activate_no_truncation(scalar_t *delta_px, scalar_t *prev_input_px, Dimensions dim)
 {
     const int lane_idx = threadIdx.x % WARP_SIZE;
 
-    for (int c_off = 0; c_off < dim.in.c; c_off += WARP_SIZE) {
-        int c = c_off + lane_idx;
-        scalar_t delta, sum;
-
-        if (c < dim.in.c) {
-            delta = delta_px[c];
-            scalar_t prev_in = prev_input_px[c];
-            sum = delta + prev_in;
-            
+    for (int c = lane_idx; c < dim.in.c; c += WARP_SIZE) {
+        scalar_t delta = delta_px[c];
+        scalar_t prev_in = prev_input_px[c];
+        scalar_t sum = delta + prev_in;
+        
+        prev_input_px[c] = sum;
+        if (activation > 0) {
             delta = activation_selector(sum, activation) - activation_selector(prev_in, activation);
-        } else {
-            delta = 0.0f;
-        }
-
-        if (c < dim.in.c) {
-            prev_input_px[c] = sum;
-            if (activation > 0) {
-                delta_px[c] = delta;
-            }
+            delta_px[c] = delta;
         }
     }
 }
@@ -822,7 +812,7 @@ __global__ void deltacnn_activate_truncate_kernel(scalar_t * __restrict__ delta,
 
         if (truncation_mode < 0) {
             // no truncation
-            activate_no_truncation<scalar_t, activation>(delta_px, prev_input_px, mask_px, dim, threshold);
+            activate_no_truncation<scalar_t, activation>(delta_px, prev_input_px, dim);
         }
         else if (truncation_mode == 0) {
             // max value > threshold

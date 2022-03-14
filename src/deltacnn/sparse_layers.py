@@ -100,6 +100,7 @@ class DCBackend(Enum):
 
 
 class DCTruncation(Enum):
+    none = -1
     max = 0
     norm = 1
     rms = 2
@@ -107,6 +108,8 @@ class DCTruncation(Enum):
     @classmethod
     def parse_string(cls, x):
         x = x.lower()
+        if x == "none":
+            return DCTruncation.none
         if x == "max":
             return DCTruncation.max
         if x == "norm":
@@ -1413,10 +1416,14 @@ class DCDensify(DCModule):
 
             return out
         else:
-            sparse_activation(input, self.prev_out, None, mask, -1, -1, -1)
+            sparse_activation(input, self.prev_out, None, mask, -1, -1, DCTruncation.none.value)
+            out = self.prev_out
             if self.clone_out:
-                return self.prev_out.clone()
-            return self.prev_out
+                out = out.clone()
+                
+            if self.activation is not None:
+                return self.activation(out)
+            return out
 
     def reset(self):
         super().reset()

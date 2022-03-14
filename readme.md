@@ -5,7 +5,7 @@ DeltaCNN can be used as a drop-in replacement for most layers of a CNN by simply
 Model weights and inference logic can be reused without the need for retraining.
 All layers are implemented in CUDA, other devices are currently not supported.
 
-A preprint of the paper is available on [Arxiv](https://www.arxiv.org).
+A preprint of the paper is available on [Arxiv](https://arxiv.org/abs/2203.03996).
 
 Find more information about the project on the [Project Website](https://dabeschte.github.io/DeltaCNN)
 
@@ -73,6 +73,7 @@ However, some things need to be considered when replacing the layers.
 from torch import nn
 class CNN(nn.Module):
     def __init__(self):
+        super(CNN, self).__init__()
         self.conv1 = nn.Conv2d(...)
         self.conv2 = nn.Conv2d(...)
         self.conv3 = nn.Conv2d(...)
@@ -89,6 +90,7 @@ class CNN(nn.Module):
 import deltacnn
 class CNN(deltacnn.DCModule):
     def __init__(self):
+        super(CNN, self).__init__()
         self.sparsify = deltacnn.DCSparsify()
         self.conv1 = deltacnn.DCConv2d(...)
         self.conv2 = deltacnn.DCConv2d(...)
@@ -112,11 +114,14 @@ or simply:
 import deltacnn
 class CNN(deltacnn.DCModule):
     def __init__(self):
+        super(CNN, self).__init__()
+        self.sparsify = DCSparsify()
         self.conv1 = deltacnn.DCConv2d(..., activation="relu")
         self.conv2 = deltacnn.DCConv2d(..., activation="relu")
         self.conv3 = deltacnn.DCConv2d(..., activation="relu", dense_out=True)
 
     def forward(self, x):
+        x = self.sparsify(x)
         x = self.conv1(x)
         x = self.conv2(x)
         return self.conv3(x)
@@ -139,9 +144,10 @@ class Normalize(nn.Module):
 
 ```python
 ####### DeltaCNN
-from deltacnn import DCDensify, DCSparsify
+from deltacnn import DCDensify, DCSparsify, DCModule
 class Normalize(DCModule):
     def __init__(self):
+        super(Normalize, self).__init__()
         self.densify = DCDensify()
         self.sparsify = DCSparsify()
 
