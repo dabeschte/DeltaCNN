@@ -57,8 +57,6 @@ In the main file, we load the original CNN, and the DeltaCNN variant, and run bo
 Play around with the DCThreshold.t_default to see how the performance and accuracy change with different values.
 For the sake of simplicity, we avoided steps like fusing batch normalization layers together with convolutional layers or tuning thresholds for each layer individually.
 
-The CNNs used in the paper can be found here `HRNet (TBA)`, `EfficientDet (TBA)`.
-
 ## 3 Using DeltaCNN in your project
 
 Using DeltaCNN in your CNN project should in most cases be as easy as replacing all layers in the CNN with the DeltaCNN equivalent and adding a dense-to-sparse (DCSparsify()) layer at the beginning and a sparse-to-dense (DCDensify()) layer at the end.
