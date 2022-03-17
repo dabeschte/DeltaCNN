@@ -4346,7 +4346,7 @@ void sparse_concatenate(scalar_t* a, scalar_t* b, scalar_t* out, uint32_t *mask_
     const int pixels_per_block = 2;
     int blocks = divup(dim.batch_size * dim.in.w * dim.in.h, pixels_per_block);
 
-    deltacnn_sparse_concatenate_kernel<scalar_t><<<blocks, threads>>>(a, b, out, mask_a, mask_b, mask_out, dim);
+    deltacnn_sparse_concatenate_kernel<scalar_t, threads, pixels_per_block><<<blocks, threads>>>(a, b, out, mask_a, mask_b, mask_out, dim);
 }
 
 template<typename scalar_t>
@@ -4355,7 +4355,7 @@ void sparse_concatenate_hp(scalar_t* a, scalar_t* b, scalar_t* out, uint32_t *ma
     const int pixels_per_block = 2;
     int blocks = divup(dim.batch_size * dim.in.w * dim.in.h, pixels_per_block);
 
-    deltacnn_sparse_concatenate_kernel_hp<scalar_t><<<blocks, threads>>>(a, b, out, mask_a, mask_b, mask_out, dim);
+    deltacnn_sparse_concatenate_kernel_hp<scalar_t, threads, pixels_per_block><<<blocks, threads>>>(a, b, out, mask_a, mask_b, mask_out, dim);
 }
 
 template<typename scalar_t, int pool_mode, int threads>
