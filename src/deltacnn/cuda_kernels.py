@@ -6,7 +6,6 @@ from deltacnn.cuda import sparse_pooling_wrapper_masked
 from deltacnn.cuda import deltacnn_init_performance_metrics, deltacnn_reset_performance_metrics, deltacnn_retrieve_metrics
 from torch.autograd.profiler import record_function
 
-# @record_function("DCConv")
 def sparse_conv(x, filter, mask=None, bias=None, stride=(1,1), padding=(0,0), dilation=(1,1), groups=1, c_out:int=None, create_out_mask=False, sub_tile_sparsity=True, out_mask=None, out_shape=None) -> torch.Tensor:
     # DeltaCNN currently only support zero padding
     pad_mode_int = 0
@@ -34,11 +33,6 @@ def sparse_conv(x, filter, mask=None, bias=None, stride=(1,1), padding=(0,0), di
             out_mask = torch.empty((out_b, 1, out_h, out_w), dtype=torch.int32, device=x.device, memory_format=torch.channels_last)
         else:
             out_mask = None
-
-    # name = f"DCConv2d {filter.shape[1]}x{filter.shape[2]}{' dw' if groups > 1 else ''}"
-    # with record_function(name):
-        # sparse_conv_bias_wrapper_masked(x, filter, bias, out, mask, out_mask, stride, padding, dilation, groups, pad_mode_int, sub_tile_sparsity)
-
     sparse_conv_bias_wrapper_masked(x, filter, bias, out, mask, out_mask, stride, padding, dilation, groups, pad_mode_int, sub_tile_sparsity)
 
     if create_out_mask and mask is not None:
@@ -46,7 +40,6 @@ def sparse_conv(x, filter, mask=None, bias=None, stride=(1,1), padding=(0,0), di
     else:
         return out
 
-# @record_function("DCDeconv")
 def sparse_deconv(x, filter, mask=None, bias=None, stride=(1,1), padding=(0,0), dilation=(1,1), groups=1, c_out:int=None, create_out_mask=False, sub_tile_sparsity=True, out_mask=None, out_shape=None) -> torch.Tensor:
     # DeltaCNN currently only support zero padding
     pad_mode_int = 0
@@ -73,11 +66,6 @@ def sparse_deconv(x, filter, mask=None, bias=None, stride=(1,1), padding=(0,0), 
         else:
             out_mask = None
 
-
-    # name = f"DCDeConv2d {filter.shape[1]}x{filter.shape[2]}{' dw' if groups > 1 else ''}"
-    # with record_function(name):
-    #     sparse_deconv_bias_wrapper_masked(x, filter, bias, out, mask, out_mask, stride, padding, dilation, groups, pad_mode_int, sub_tile_sparsity)
-    
     sparse_deconv_bias_wrapper_masked(x, filter, bias, out, mask, out_mask, stride, padding, dilation, groups, pad_mode_int, sub_tile_sparsity)
 
     if create_out_mask and mask is not None:
@@ -85,7 +73,6 @@ def sparse_deconv(x, filter, mask=None, bias=None, stride=(1,1), padding=(0,0), 
     else:
         return out
 
-# @record_function("DCPool")
 def sparse_pooling(x, prev_x, kernel_size, mask=None, stride=(1,1), padding=(0,0), dilation=(1,1), create_out_mask=True, sub_tile_sparsity=True, out_mask=None, pooling_mode_int=0, out_shape=None) -> torch.Tensor:
     # DeltaCNN currently only support zero padding
     pad_mode_int = 0
@@ -137,32 +124,27 @@ def sparse_pooling(x, prev_x, kernel_size, mask=None, stride=(1,1), padding=(0,0
     else:
         return out
 
-# @record_function("DCACtivate")
+
 def sparse_activation(x, prev_x, truncated, mask, threshold, activation, truncation_mode):
     deltacnn_activate_truncate(x, prev_x, truncated, mask, threshold, activation, truncation_mode)
 
 
-# @record_function("DCSparsify")
 def sparsify(input, prev_in, delta, mask, threshold):
     deltacnn_prepare_diff_mask_wrapper(input, prev_in, delta, mask, threshold)
 
 
-# @record_function("DCAddTensors")
 def sparse_add_tensors(a, b, prev_out, out, mask_a, mask_b, mask_out, weight_a, weight_b, activation, dense_out):
     sparse_add_tensors_wrapper(a, b, prev_out, out, mask_a, mask_b, mask_out, weight_a, weight_b, activation, dense_out)
 
 
-# @record_function("DCAddToDenseTensor")
 def sparse_add_to_dense_tensor(a, b, mask_a, activation=0):
     sparse_add_to_dense_tensor_wrapper(a, b, mask_a, activation)
 
 
-# @record_function("DCSparseMulAdd")
 def sparse_mul_add(x, x_mask, out, out_mask, scale, bias):
     sparse_mul_add_wrapper(x, out, x_mask, out_mask, scale, bias)
 
 
-# @record_function("DCUpsample")
 def sparse_upsample(input, mask_in, scale, out=None):
     if out is None:
         is_channels_last = input.is_contiguous(memory_format=torch.channels_last)
@@ -180,7 +162,6 @@ def sparse_upsample(input, mask_in, scale, out=None):
     return out, mask_out
 
 
-# @record_function("DCConcatenate")
 def sparse_concatenate(a, b, out=None):
     a, mask_a = a
     b, mask_b = b

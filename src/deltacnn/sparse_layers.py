@@ -53,7 +53,7 @@ def differentiable_threshold(input_activated, input, truncated, prev_input, thre
     elif mode == "sigmoid":
         soft_mask = abs_active_input - threshold
         soft_mask = torch.max(soft_mask, dim=1, keepdim=True)[0]
-        soft_mask *= DCThreshold.t_default_factor
+        soft_mask *= DCConv2d.delta_scale_sigmoid
         soft_mask = torch.sigmoid(soft_mask)
         soft_mask = torch.repeat_interleave(soft_mask, repeats=input.shape[1], dim=1)
         inv_soft_mask = 1.0 - soft_mask
@@ -67,7 +67,7 @@ def differentiable_threshold(input_activated, input, truncated, prev_input, thre
     elif mode == "sigmoid_norm":
         soft_mask = torch.norm(abs_active_input, dim=1, keepdim=True)
         soft_mask = soft_mask - threshold
-        soft_mask *= DCThreshold.t_default_factor
+        soft_mask *= DCConv2d.delta_scale_sigmoid
         soft_mask = torch.sigmoid(soft_mask)
         soft_mask = torch.repeat_interleave(soft_mask, repeats=input.shape[1], dim=1)
         inv_soft_mask = 1.0 - soft_mask
@@ -265,7 +265,7 @@ class DCConv2d(nn.Conv2d, DCModule):
     n_sparse_output = 0
     n_dense_output = 0
     store_out_masks = False
-    delta_threshold_factor = 100
+    delta_scale_sigmoid = 100
     flops_sum = 0
     measure_flops = False
 

@@ -1,3 +1,7 @@
+# based on the MobileNetv2 implementation from PyTorch
+# source: https://pytorch.org/vision/0.8/_modules/torchvision/models/mobilenet.html
+# and: https://pytorch.org/hub/pytorch_vision_mobilenet_v2/
+
 import torch
 from torch import nn
 from deltacnn.sparse_layers import DCDensify, DCModule, DCConv2d, DCBatchNorm2d, DCAdd, DCActivation, DCAdaptiveAveragePooling, DCSparsify
