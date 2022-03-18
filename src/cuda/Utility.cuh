@@ -2,24 +2,25 @@
 #include <stdio.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include "common.cuh"
 
 static constexpr unsigned int FULL_MASK{0xFFFFFFFF};
 static constexpr unsigned int WARP_SIZE{32};
 
 // ##############################################################################################################################################
 //
-static inline void HandleError(cudaError_t err,
-	const char* string,
-	const char *file,
-	int line) {
-	if (err != cudaSuccess) {
-		printf("%s in \n\n%s at line %d\n", cudaGetErrorString(err),
-			file, line);
-		exit(-1);
-	}
-}
+// static inline void HandleError(cudaError_t err,
+// 	const char* string,
+// 	const char *file,
+// 	int line) {
+// 	if (err != cudaSuccess) {
+// 		printf("%s in \n\n%s at line %d\n", cudaGetErrorString(err),
+// 			file, line);
+// 		exit(-1);
+// 	}
+// }
 
-#define HANDLE_ERROR( err ) (HandleError( err, "", __FILE__, __LINE__ ))
+// #define HANDLE_ERROR( err ) (HandleError( err, "", __FILE__, __LINE__ ))
 
 // ##############################################################################################################################################
 //

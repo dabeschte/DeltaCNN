@@ -270,7 +270,7 @@ __global__ void delta_deconv_4x4_sp(
     const int lane_idx = threadIdx.x % WARP_SIZE;
     const int warp_idx = threadIdx.x / WARP_SIZE;
     const int sub_warp_idx = lane_idx / 8;
-    const int sub_warp_lane_idx = lane_idx % 8;
+    // const int sub_warp_lane_idx = lane_idx % 8;
     const int n_warps = BLOCK_SIZE / WARP_SIZE;
 
     __shared__ uint32_t s_mask[n_in_px];
@@ -955,7 +955,7 @@ void delta_deconv(scalar_t *input, scalar_t *output, scalar_t *filter, scalar_t 
         const int stride = 2;
         const int pixelsPerBlockX = 8;
         const int pixelsPerBlockY = 8;
-        uint32_t blocks = dim.batch_size * divup(dim.out.h+config.padding[0], pixelsPerBlockY*config.dilation[0]) * divup(dim.out.w+config.padding[1], pixelsPerBlockX*config.dilation[1]) * config.dilation[0]*config.dilation[1];
+        // uint32_t blocks = dim.batch_size * divup(dim.out.h+config.padding[0], pixelsPerBlockY*config.dilation[0]) * divup(dim.out.w+config.padding[1], pixelsPerBlockX*config.dilation[1]) * config.dilation[0]*config.dilation[1];
         uint32_t y = divup(dim.out.h+config.padding[0], pixelsPerBlockY * config.dilation[0]) * config.dilation[0];
         uint32_t x = divup(dim.out.w+config.padding[1], pixelsPerBlockX * config.dilation[1]) * config.dilation[1];
         

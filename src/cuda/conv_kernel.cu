@@ -1278,7 +1278,7 @@ __global__ void deltacnn_standard_conv_hp(
     }
 
 
-    for (int out_c_off = tile_start_z; out_c_off < dim.out.c && (FULL_DEPTH || out_c_off < tile_start_z + OUT_CHANNELS_PER_BLOCK); out_c_off += BLOCK_SIZE*2) {
+    for (int out_c_off = tile_start_z; out_c_off < dim.out.c && (FULL_DEPTH || out_c_off < tile_start_z + OUT_CHANNELS_PER_BLOCK); out_c_off += BLOCK_SIZE*OUT_CHANNELS_PER_THREAD) {
         const int out_c = out_c_off + threadIdx.x * 2;
         half2 t_out[n_pixels_out];
 

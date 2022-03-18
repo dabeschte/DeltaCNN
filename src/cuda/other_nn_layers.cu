@@ -2971,6 +2971,7 @@ __global__ void deltacnn_sparse_pooling_sp_warp_per_channel(
     const int tile_start_z = FULL_DEPTH ? 0 : blockIdx.z * OUT_CHANNELS_PER_BLOCK;
     const int w_in = pixelsPerBlock + (pixelsPerBlock-1) * (config.stride[0]-1) + (config.kernel_size[0]-1);
 
+
     if (tile_start_out_y >= dim.out.h || tile_start_out_x >= dim.out.w) {
         // can happen in dilated mode
         return;
@@ -3000,6 +3001,12 @@ __global__ void deltacnn_sparse_pooling_sp_warp_per_channel(
         }
     }
     __syncthreads();
+
+    // if (threadIdx.x == 0) {
+    //     printf("tile_idx=%i tiles_per_x=%i dilation_idx=%i dilation_sub_idx=%i tile_start_out_y=%i tile_start_out_x=%i tile_start_in_y=%i tile_start_in_x=%i, tile_start_z=%i w_in=%i density=%i\n",
+    //     tile_idx, tiles_per_x, dilation_idx, dilation_sub_idx, tile_start_out_y, tile_start_out_x, tile_start_in_y, tile_start_in_x, tile_start_z, w_in, density
+    //     );
+    // }
 
 #ifdef ENABLE_METRICS
     if (threadIdx.x == 0 && blockIdx.z == 0) {
@@ -3077,7 +3084,13 @@ __global__ void deltacnn_sparse_pooling_sp_warp_per_channel(
         const int in_y_im = in_y * config.dilation[0] + tile_start_in_y;
         const int in_x_im = in_x * config.dilation[1] + tile_start_in_x;
         const int in_idx = (in_y_im * dim.in.w + in_x_im) * dim.in.c + tile_start_z;
-        const bool valid = in_y_im >= 0 && in_y_im < dim.in.h && in_x_im >= 0 && in_x_im < dim.in.w && (mask == nullptr || batch_mask[in_y_im * dim.in.w + in_x_im] != 0);
+        const bool inside = in_y_im >= 0 && in_y_im < dim.in.h && in_x_im >= 0 && in_x_im < dim.in.w;
+        const bool valid = inside && (mask == nullptr || batch_mask[in_y_im * dim.in.w + in_x_im] != 0);
+        
+        // printf("tId=%i in_y=%i in_x=%i in_y_im=%i in_x_im=%i,in_idx=%i, valid=%i\n",
+        //     threadIdx.x, in_y, in_x, in_y_im, in_x_im, in_idx, (valid?1:0)
+        // );
+
         if (!valid && POOL_MODE == 1) {
             // TODO improve like single pixel version
             continue;
@@ -3101,38 +3114,37 @@ __global__ void deltacnn_sparse_pooling_sp_warp_per_channel(
         #pragma unroll
         for (int out_c = 0; out_c < OUT_CHANNELS_PER_BLOCK; ++out_c) {
             if (out_c + tile_start_z < dim.out.c) {
-                const scalar_t prev_in = POOL_MODE == 0 ? batch_prev_in[in_idx + out_c] : 0.0f;
+                const scalar_t prev_in = POOL_MODE == 0 && inside ? batch_prev_in[in_idx + out_c] : 0.0f;
                 const scalar_t acc_val = delta[out_c] + prev_in;
                 pooling_step<scalar_t, POOL_MODE>(result[out_c], result_prev[out_c], acc_val, prev_in);
+
+                // if (blockIdx.x == 0 && blockIdx.z == 0) {
+                //     printf("in_y=%i in_x=%i in_y_im=%i in_x_im=%i in_idx=%i dim.in.c=%i out_c=%i valid=%i delta=%f prev_in=%f tId=%i\n", 
+                //         in_y, in_x, in_y_im, in_x_im, in_idx, dim.in.c, out_c, (valid?1:0), delta[out_c], prev_in, threadIdx.x
+                //     );
+                // } 
             }
         }
 
-        // if (blockIdx.x == 0 && blockIdx.z == 0) {
-        //     printf("in_y=%i in_x=%i in_y_im=%i in_x_im=%i in_idx=%i dim.in.c=%i out_c=%i valid=%i delta=%f prev_in=%f tId=%i\n", 
-        //         in_y, in_x, in_y_im, in_x_im, in_idx, dim.in.c, out_c, (valid?1:0), delta, prev_in, threadIdx.x
-        //     );
-        // } 
-
     }
-
-    // if (blockIdx.x == 0 && blockIdx.z == 0) {
-    //     printf("before: result=%f, result_prev=%f tId=%i\n", result, result_prev, threadIdx.x);
-    // } 
 
     if (POOL_MODE == 0) {
         for (int out_c = 0; out_c < OUT_CHANNELS_PER_BLOCK; ++out_c) {
+            // if (blockIdx.x == 0 && blockIdx.z == 0) {
+            //     printf("before: out_c=%i, result=%f, result_prev=%f tId=%i\n", out_c, result[out_c], result_prev[out_c], threadIdx.x);
+            // } 
             result[out_c] = Utils::warpReduceMax(result[out_c]);
             result_prev[out_c] = Utils::warpReduceMax(result_prev[out_c]);
+
+            // if (threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.z == 0) {
+            //     printf("after: out_c=%i, result=%f, result_prev=%f\n", out_c, result[out_c], result_prev[out_c]);
+            // } 
         }
     } else {
         for (int out_c = 0; out_c < OUT_CHANNELS_PER_BLOCK; ++out_c) {
             result[out_c] = Utils::warpReduceSum(result[out_c]);
         }
     }
-
-    // if (threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.z == 0) {
-    //     printf("result=%f, result_prev=%f\n", result, result_prev);
-    // } 
 
     if (threadIdx.x == 0) {
         if (POOL_MODE == 0) {
@@ -4455,6 +4467,7 @@ void sparse_pool_templates(scalar_t* input, scalar_t* prev_input, scalar_t* out,
 
 template<typename scalar_t, int pool_mode>
 void sparse_pool_thread_templates(scalar_t* input, scalar_t* prev_input, scalar_t* out, uint32_t *mask, uint32_t *out_mask, Dimensions dim, ConvConfig config) {
+    // TODO refactor this mess. reduce set of implementations to reduce risk of bugs
     if (dim.out.w == 1 && dim.out.h == 1 && config.kernel_size[0] > 16 && config.kernel_size[1] > 16) {
         if (dim.out.c <= 32) {
             const int threads = 32;
@@ -4491,7 +4504,7 @@ void sparse_pool_thread_templates(scalar_t* input, scalar_t* prev_input, scalar_
     else if (config.kernel_size[0]*config.kernel_size[1] >= WARP_SIZE) {
         // special mode for very large kernels
         const int threads = WARP_SIZE;
-        const int blocks = dim.out.h * dim.out.w * dim.batch_size;
+        uint32_t blocks = dim.batch_size * divup(dim.out.h, config.dilation[0]) * divup(dim.out.w, config.dilation[1]) * config.dilation[0] * config.dilation[1];
         if (dim.out.c <= 32) {
             const int out_channels_per_block = 1;
             dim3 gridDim(blocks, 1, divup(dim.out.c, out_channels_per_block));
