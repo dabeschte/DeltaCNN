@@ -113,7 +113,7 @@ import deltacnn
 class CNN(deltacnn.DCModule):
     def __init__(self):
         super(CNN, self).__init__()
-        self.sparsify = DCSparsify()
+        self.sparsify = deltacnn.DCSparsify()
         self.conv1 = deltacnn.DCConv2d(..., activation="relu")
         self.conv2 = deltacnn.DCConv2d(..., activation="relu")
         self.conv3 = deltacnn.DCConv2d(..., activation="relu", dense_out=True)
