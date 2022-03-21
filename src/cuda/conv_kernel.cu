@@ -362,10 +362,9 @@ __global__ void deltacnn_3x3_sp(
         #pragma unroll
         for (int update_idx = 0; update_idx < sparse_mode_max_elements; ++update_idx) {
             set_elements[update_idx] = -1;
-            for (int i = last_element_idx + 1; i < n_in_px; ++i) {
-                if (s_mask[i] != 0) {
-                    set_elements[update_idx] = i;
-                    last_element_idx = i;
+            for (++last_element_idx; last_element_idx < n_in_px; ++last_element_idx) {
+                if (s_mask[last_element_idx] != 0) {
+                    set_elements[update_idx] = last_element_idx;
                     break;
                 }
             }
@@ -452,6 +451,8 @@ __global__ void deltacnn_3x3_sp(
                                     if (i_t_f + t_f_iter * n_t_f < dim.in.c) 
                                     {
                                         t_f[i_t_f] = in_c_filter[i_t_f * 9 * dim.out.c];
+                                    } else {
+                                        t_f[i_t_f] = 0.0f;
                                     }
                                 }
                                 
@@ -467,7 +468,6 @@ __global__ void deltacnn_3x3_sp(
                                         const bool inside = out_y >= 0 && out_y < pixelsPerBlockY && out_x >= 0 && out_x < pixelsPerBlockX; 
                                         const float* s_in_px = smem.sparse.s_in[element_idx];
                                         if (inside) {
-
                                             float result = 0.0f;
                                             #pragma unroll
                                             for (int in_c_shared = 0; in_c_shared < n_t_f; ++in_c_shared) {
@@ -1674,9 +1674,11 @@ deltacnn_3x3_hp(
                             for (int in_c_iter = 0; in_c_iter < 2; ++in_c_iter) {
                                 #pragma unroll
                                 for (int i_t_f = 0; i_t_f < n_t_f; ++i_t_f) {
-                                    if (i_t_f * 2 + t_f_iter * n_t_f * 2 < in_c_aligned) 
+                                    if (i_t_f * 2 + t_f_iter * n_t_f * 2 < in_c_aligned)
                                     {
                                         t_f[i_t_f] = *reinterpret_cast<const half2*>(&in_c_filter[((in_c_iter + i_t_f * 2) * 9) * out_c_aligned]);
+                                    } else {
+                                        t_f[i_t_f] = __float2half2(0.0f);
                                     }
                                 }
 
