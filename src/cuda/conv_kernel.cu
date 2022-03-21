@@ -1678,7 +1678,7 @@ deltacnn_3x3_hp(
                                     {
                                         t_f[i_t_f] = *reinterpret_cast<const half2*>(&in_c_filter[((in_c_iter + i_t_f * 2) * 9) * out_c_aligned]);
                                     } else {
-                                        t_f[i_t_f] = __float2half2(0.0f);
+                                        t_f[i_t_f] = __float2half2_rn(0.0f);
                                     }
                                 }
 
