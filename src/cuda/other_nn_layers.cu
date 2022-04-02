@@ -3749,7 +3749,7 @@ __global__ void deltacnn_sparse_concatenate_kernel_hp(
             mask_out[px_idx] = 1;
         }
 
-        if (dim.in.c % 2 == 0) {
+        if (dim.in.c % 2 == 0 && dim.out.c % 2 == 0) {
             const half2 *a_px = reinterpret_cast<const half2*>(&val_a[px_idx * dim.in.c]);
             const half2 *b_px = reinterpret_cast<const half2*>(&val_b[px_idx * (dim.out.c - dim.in.c)]);
             half2 *out_px = reinterpret_cast<half2*>(&val_out[px_idx * dim.out.c]);
@@ -3766,11 +3766,11 @@ __global__ void deltacnn_sparse_concatenate_kernel_hp(
 
             if (active_b) {
                 for (int c = lane_idx; c * 2 < dim.out.c - dim.in.c; c += WARP_SIZE) {
-                    out_px[c + dim.in.c] = b_px[c];
+                    out_px[c + dim.in.c / 2] = b_px[c];
                 }
             } else {
                 for (int c = lane_idx; c * 2 < dim.out.c - dim.in.c; c += WARP_SIZE) {
-                    out_px[c + dim.in.c] = __float2half2_rn(0.0f);
+                    out_px[c + dim.in.c / 2] = __float2half2_rn(0.0f);
                 }
             }
         } else {
