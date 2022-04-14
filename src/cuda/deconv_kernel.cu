@@ -14,9 +14,10 @@ void init_d_metrics_deconv_kernels() {
 }
 
 
-template<int pixelsPerBlockX, int pixelsPerBlockY, int OUT_CHANNELS_PER_BLOCK, int STRIDE, bool FULL_DEPTH, bool ENABLE_DILATION>
+template<int pixelsPerBlockX, int pixelsPerBlockY, int OUT_CHANNELS_PER_BLOCK, int STRIDE, bool FULL_DEPTH, bool ENABLE_DILATION, int KERNEL_SIZE>
 __device__ __forceinline__ void calc_tile_indices_deconv(int& tile_start_out_y, int& tile_start_out_x, int& tile_start_in_y, int& tile_start_in_x, int& tile_start_z, int& batch, const ConvConfig& config, const Dimensions& dim) {
     if (ENABLE_DILATION) {
+        printf("ERROR: Transposed convolution does not support dilation.\n");
         tile_start_out_y = (blockIdx.y / config.dilation[0]) * pixelsPerBlockY * config.dilation[0] + (blockIdx.y % config.dilation[0]);
         tile_start_out_x = (blockIdx.x / config.dilation[1]) * pixelsPerBlockX * config.dilation[1] + (blockIdx.x % config.dilation[1]);
         tile_start_in_y = tile_start_out_y / STRIDE;
@@ -25,8 +26,17 @@ __device__ __forceinline__ void calc_tile_indices_deconv(int& tile_start_out_y, 
     } else {
         tile_start_out_y = blockIdx.y * pixelsPerBlockY - config.padding[0];
         tile_start_out_x = blockIdx.x * pixelsPerBlockX - config.padding[1];
-        tile_start_in_y = blockIdx.y * pixelsPerBlockY / STRIDE -(config.kernel_size[0] / STRIDE - 1);
-        tile_start_in_x = blockIdx.x * pixelsPerBlockX / STRIDE -(config.kernel_size[1] / STRIDE - 1);
+        tile_start_in_y = blockIdx.y * pixelsPerBlockY / STRIDE -(divup(KERNEL_SIZE, STRIDE) - 1);
+        tile_start_in_x = blockIdx.x * pixelsPerBlockX / STRIDE -(divup(KERNEL_SIZE, STRIDE) - 1);
+        // if (threadIdx.x == 0) {
+        //     printf("BID.x=%i BID.y=%i, toy0=%i tox0=%i tiy0=%i tix0=%i\n",
+        //         blockIdx.x, blockIdx.y,
+        //         tile_start_out_y,
+        //         tile_start_out_x,
+        //         tile_start_in_y,
+        //         tile_start_in_x
+        //     );
+        // }
     }
     if (FULL_DEPTH) {
         tile_start_z = 0;
@@ -40,11 +50,11 @@ __device__ __forceinline__ void calc_tile_indices_deconv(int& tile_start_out_y, 
 
 template<int BLOCK_SIZE, int n_in_px, int w_in, bool ENABLE_DILATION, int KERNEL_SIZE=3, int STRIDE=1>
 __device__ __forceinline__ void load_mask(const int tile_start_in_y, const int tile_start_in_x, const int lane_idx, const uint32_t* batch_mask, uint32_t* s_mask, uint64_t& t_mask, uint32_t& density, const Dimensions& dim, const ConvConfig& config) {
-    const int DILATION_X = ENABLE_DILATION ? config.dilation[1] : 1;
-    const int DILATION_Y = ENABLE_DILATION ? config.dilation[0] : 1;
+    // const int DILATION_X = ENABLE_DILATION ? config.dilation[1] : 1;
+    // const int DILATION_Y = ENABLE_DILATION ? config.dilation[0] : 1;
     
     // because in a 1x1 conv, we can directly skip input elements which we can't do for larger convs
-    const int STRIDE_FACTOR = KERNEL_SIZE == 1 ? STRIDE : 1;
+    // const int STRIDE_FACTOR = KERNEL_SIZE == 1 ? STRIDE : 1;
 
     for (int i = threadIdx.x; i < n_in_px; i += BLOCK_SIZE) {
         int y = tile_start_in_y + (i / w_in);
@@ -236,8 +246,8 @@ __device__ __forceinline__ void set_out_zero_hp(scalar_t* batch_out, const scala
 }
 
 
-template<typename scalar_t = float, int pixelsPerBlockX=3, int pixelsPerBlockY=3, int BLOCK_SIZE=256, int OUT_CHANNELS_PER_BLOCK=32, bool SUB_TILE_SPARSITY=false, bool FULL_DEPTH=false, int STRIDE=1, bool ENABLE_DILATION=false>
-__global__ void delta_deconv_4x4_sp(
+template<typename scalar_t=float, int KERNEL_SIZE=4, int pixelsPerBlockX=3, int pixelsPerBlockY=3, int BLOCK_SIZE=256, int OUT_CHANNELS_PER_BLOCK=32, bool SUB_TILE_SPARSITY=false, bool FULL_DEPTH=false, int STRIDE=1, bool ENABLE_DILATION=false>
+__global__ void delta_deconv_sp(
     const scalar_t* input,
     scalar_t* output,
     const scalar_t* filter,
@@ -250,26 +260,30 @@ __global__ void delta_deconv_4x4_sp(
     const int DILATION_X = ENABLE_DILATION ? config.dilation[1] : 1;
     const int DILATION_Y = ENABLE_DILATION ? config.dilation[0] : 1;
 
-    int tile_start_out_y, tile_start_out_x, tile_start_in_y, tile_start_in_x, tile_start_z, batch;
-    calc_tile_indices_deconv<pixelsPerBlockX, pixelsPerBlockY, OUT_CHANNELS_PER_BLOCK, STRIDE, FULL_DEPTH, ENABLE_DILATION>(tile_start_out_y, tile_start_out_x, tile_start_in_y, tile_start_in_x, tile_start_z, batch, config, dim);
+    const int IN_PIXELS_OFFSET = divup(KERNEL_SIZE, STRIDE) - 1;
 
+    int tile_start_out_y, tile_start_out_x, tile_start_in_y, tile_start_in_x, tile_start_z, batch;
+    calc_tile_indices_deconv<pixelsPerBlockX, pixelsPerBlockY, OUT_CHANNELS_PER_BLOCK, STRIDE, FULL_DEPTH, ENABLE_DILATION, KERNEL_SIZE>(tile_start_out_y, tile_start_out_x, tile_start_in_y, tile_start_in_x, tile_start_z, batch, config, dim);
 
     scalar_t* batch_out = output + (batch * dim.out.h * dim.out.w * dim.out.c);
     const scalar_t* batch_in = input + (batch * dim.in.h * dim.in.w * dim.in.c);
     const uint32_t* batch_mask = mask == nullptr ? nullptr : mask + (batch * dim.in.h * dim.in.w);
     
     const int n_pixels_out = pixelsPerBlockX * pixelsPerBlockY;
-    const int KERNEL_SIZE = 4;
-    const int K_HALF = (KERNEL_SIZE-1) / 2;
+    // const int K_HALF = (KERNEL_SIZE-1) / 2;
     // TODO check this equation. not sure if this really makes sense or is just randomly correct for this specific tile/stride/kernel size
-    const int w_in = (KERNEL_SIZE + pixelsPerBlockX - 1 + STRIDE - 1) / STRIDE;
-    const int h_in = (KERNEL_SIZE + pixelsPerBlockY - 1 + STRIDE - 1) / STRIDE;
+    // const int w_in = (KERNEL_SIZE + pixelsPerBlockX - 1 + STRIDE - 1) / STRIDE;
+    // const int h_in = (KERNEL_SIZE + pixelsPerBlockY - 1 + STRIDE - 1) / STRIDE;
+    // const int w_in = KERNEL_SIZE + (pixelsPerBlockX - KERNEL_SIZE) / STRIDE;
+    // const int h_in = KERNEL_SIZE + (pixelsPerBlockY - KERNEL_SIZE) / STRIDE;
+    const int w_in = pixelsPerBlockX / STRIDE + IN_PIXELS_OFFSET;
+    const int h_in = pixelsPerBlockY / STRIDE + IN_PIXELS_OFFSET;
     const int n_in_px = w_in * h_in;
     const int in_row_vals = dim.in.w * dim.in.c;
 
     const int lane_idx = threadIdx.x % WARP_SIZE;
     const int warp_idx = threadIdx.x / WARP_SIZE;
-    const int sub_warp_idx = lane_idx / 8;
+    // const int sub_warp_idx = lane_idx / 8;
     // const int sub_warp_lane_idx = lane_idx % 8;
     const int n_warps = BLOCK_SIZE / WARP_SIZE;
 
@@ -317,37 +331,37 @@ __global__ void delta_deconv_4x4_sp(
             for (int i = 0; i < n_pixels_out; ++i) {
                 t_out[i] = 0;
             }
-            const int IN_OFF = -(KERNEL_SIZE/STRIDE) + 1; 
+            const int IN_OFF = 0;
             #pragma unroll
             for (int in_y = IN_OFF; in_y < h_in + IN_OFF; ++in_y) {
                 #pragma unroll
                 for (int in_x = IN_OFF; in_x < w_in + IN_OFF; ++in_x) {
                     const int val = is_px_mask_set<w_in, n_in_px>(in_x-IN_OFF, in_y-IN_OFF, t_mask, s_mask);
 
-                    const int min_f_y = Utils::constexpr_max(0, -in_y*STRIDE);
-                    const int min_f_x = Utils::constexpr_max(0, -in_x*STRIDE);
-                    const int max_f_y = Utils::constexpr_min(KERNEL_SIZE, pixelsPerBlockY - in_y*STRIDE);
-                    const int max_f_x = Utils::constexpr_min(KERNEL_SIZE, pixelsPerBlockX - in_x*STRIDE);
+                    const int min_f_y = Utils::constexpr_max(0, (IN_PIXELS_OFFSET-in_y)*STRIDE);
+                    const int min_f_x = Utils::constexpr_max(0, (IN_PIXELS_OFFSET-in_x)*STRIDE);
+                    const int max_f_y = Utils::constexpr_min(KERNEL_SIZE, pixelsPerBlockY - (in_y-IN_PIXELS_OFFSET)*STRIDE);
+                    const int max_f_x = Utils::constexpr_min(KERNEL_SIZE, pixelsPerBlockX - (in_x-IN_PIXELS_OFFSET)*STRIDE);
                     #pragma unroll
                     for (int f_y = min_f_y; f_y < max_f_y; ++f_y) {
                         #pragma unroll
                         for (int f_x = min_f_x; f_x < max_f_x; ++f_x) {
-                            const int t_out_idx = (in_y*STRIDE + f_y) * pixelsPerBlockX + (in_x*STRIDE + f_x);
+                            const int out_y = f_y + (in_y-IN_PIXELS_OFFSET) * STRIDE;
+                            const int out_x = f_x + (in_x-IN_PIXELS_OFFSET) * STRIDE;
+                            const int t_out_idx = out_y * pixelsPerBlockX + out_x;
                             t_out[t_out_idx] += val;
 #ifdef ENABLE_METRICS
                             n_active_inputs += val;
 #endif
                             // if (threadIdx.x == 0 && in_y+f_y == 2 && in_x+f_x == 0 && blockIdx.x == 0) {
                             // if (threadIdx.x == 0 && in_x+f_x == 2 && in_y+f_y == 2 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && out_c == 0 && in_c == 0) {
-                            //     printf("BID=%i out_y/s=%i out_x/s=%i out_y=%i out_x=%i in_y=%i in_x=%i f_y=%i f_x=%i min_f_y=%i max_f_y=%i min_f_x=%i max_f_x=%i, f=%f, s_mask_idx=%i, val=%f, mask=%i, t_out=%f, stride=%i\n",
-                            //         blockIdx.x, ((in_y+f_y)/STRIDE), ((in_x+f_x)/STRIDE),
-                            //         in_y+f_y, in_x+f_x, in_y, in_x, f_y, f_x,
+                            // if (blockIdx.x >= 2 && blockIdx.y == 0) {
+                            //     printf("BID=%i out_y=%i out_x=%i in_y=%i in_x=%i f_y=%i f_x=%i min_f_y=%i max_f_y=%i min_f_x=%i max_f_x=%i, mask=%i, t_out=%i, stride=%i\n",
+                            //         blockIdx.x, out_y, out_x,
+                            //         in_y, in_x, f_y, f_x,
                             //         min_f_y, max_f_y, min_f_x, max_f_x, 
-                            //         t_f[(f_y+K_HALF)*KERNEL_SIZE + f_x+K_HALF], 
-                            //         (in_y+K_HALF) * w_in + (in_x+K_HALF),
-                            //         val,
                             //         (is_px_mask_set<w_in, n_in_px>(in_x+K_HALF, in_y+K_HALF, t_mask, s_mask)?1:0),
-                            //         t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)],
+                            //         t_out[t_out_idx],
                             //         STRIDE
                             //     );
                             // }
@@ -508,26 +522,28 @@ __global__ void delta_deconv_4x4_sp(
                         }
                     }
                 
-                    const int IN_OFF = -(KERNEL_SIZE/STRIDE) + 1; 
+                    const int IN_OFF = 0;
                     #pragma unroll
                     for (int in_y = IN_OFF; in_y < h_in + IN_OFF; ++in_y) {
                         #pragma unroll
                         for (int in_x = IN_OFF; in_x < w_in + IN_OFF; ++in_x) {
                             const scalar_t val = s_in[(in_y-IN_OFF) * w_in + (in_x-IN_OFF)][in_c];
-
-                            const int min_f_y = Utils::constexpr_max(0, -in_y*STRIDE);
-                            const int min_f_x = Utils::constexpr_max(0, -in_x*STRIDE);
-                            const int max_f_y = Utils::constexpr_min(KERNEL_SIZE, pixelsPerBlockY - in_y*STRIDE);
-                            const int max_f_x = Utils::constexpr_min(KERNEL_SIZE, pixelsPerBlockX - in_x*STRIDE);
+                            const int min_f_y = Utils::constexpr_max(0, (IN_PIXELS_OFFSET-in_y)*STRIDE);
+                            const int min_f_x = Utils::constexpr_max(0, (IN_PIXELS_OFFSET-in_x)*STRIDE);
+                            const int max_f_y = Utils::constexpr_min(KERNEL_SIZE, pixelsPerBlockY - (in_y-IN_PIXELS_OFFSET)*STRIDE);
+                            const int max_f_x = Utils::constexpr_min(KERNEL_SIZE, pixelsPerBlockX - (in_x-IN_PIXELS_OFFSET)*STRIDE);
                             #pragma unroll
                             for (int f_y = min_f_y; f_y < max_f_y; ++f_y) {
                                 #pragma unroll
                                 for (int f_x = min_f_x; f_x < max_f_x; ++f_x) {
-                                    const int t_out_idx = (in_y*STRIDE + f_y) * pixelsPerBlockX + (in_x*STRIDE + f_x);
+                                    const int out_y = f_y + (in_y-IN_PIXELS_OFFSET) * STRIDE;
+                                    const int out_x = f_x + (in_x-IN_PIXELS_OFFSET) * STRIDE;
+                                    const int t_out_idx = out_y * pixelsPerBlockX + out_x;
                                     t_out[t_out_idx] += val * t_f[f_y*KERNEL_SIZE + f_x];
                                     // if (threadIdx.x == 0 && in_y+f_y == 2 && in_x+f_x == 0 && blockIdx.x == 0) {
                                     // if (threadIdx.x == 0 && in_x+f_x == 2 && in_y+f_y == 2 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && out_c == 0 && in_c == 0) {
-                                    //     printf("BID=%i out_y/s=%i out_x/s=%i out_y=%i out_x=%i in_y=%i in_x=%i f_y=%i f_x=%i min_f_y=%i max_f_y=%i min_f_x=%i max_f_x=%i, f=%f, s_mask_idx=%i, val=%f, mask=%i, t_out=%f, stride=%i\n",
+                                    // if (threadIdx.x == 0) {
+                                    //     printf("BID=%i out_y/s=%i out_x/s=%i out_y=%i out_x=%i in_y=%i in_x=%i f_y=%i f_x=%i min_f_y=%i max_f_y=%i min_f_x=%i max_f_x=%i, f=%f, s_mask_idx=%i, val=%f, mask=%i, t_out=%f, stride=%i, w_in=%i, h_in=%i, IN_OFF=%i\n",
                                     //         blockIdx.x, ((in_y+f_y)/STRIDE), ((in_x+f_x)/STRIDE),
                                     //         in_y+f_y, in_x+f_x, in_y, in_x, f_y, f_x,
                                     //         min_f_y, max_f_y, min_f_x, max_f_x, 
@@ -536,7 +552,10 @@ __global__ void delta_deconv_4x4_sp(
                                     //         val,
                                     //         (is_px_mask_set<w_in, n_in_px>(in_x+K_HALF, in_y+K_HALF, t_mask, s_mask)?1:0),
                                     //         t_out[((in_y+f_y)/STRIDE) * pixelsPerBlockX + ((in_x+f_x)/STRIDE)],
-                                    //         STRIDE
+                                    //         STRIDE,
+                                    //         w_in,
+                                    //         h_in,
+                                    //         IN_OFF
                                     //     );
                                     // }
                                     // if (threadIdx.x == 0 && blockIdx.x+blockIdx.y+blockIdx.z == 14) {
@@ -574,8 +593,8 @@ __global__ void delta_deconv_4x4_sp(
 
 
 
-template<typename scalar_t = float, int pixelsPerBlockX=3, int pixelsPerBlockY=3, int BLOCK_SIZE=256, int OUT_CHANNELS_PER_BLOCK=32, bool SUB_TILE_SPARSITY=false, bool FULL_DEPTH=false, int STRIDE=1, bool ENABLE_DILATION=false>
-__global__ void delta_deconv_4x4_hp(
+template<typename scalar_t=half, int KERNEL_SIZE=4, int pixelsPerBlockX=3, int pixelsPerBlockY=3, int BLOCK_SIZE=256, int OUT_CHANNELS_PER_BLOCK=32, bool SUB_TILE_SPARSITY=false, bool FULL_DEPTH=false, int STRIDE=1, bool ENABLE_DILATION=false>
+__global__ void delta_deconv_hp_kernel(
     const scalar_t* input,
     scalar_t* output,
     const scalar_t* filter,
@@ -588,31 +607,33 @@ __global__ void delta_deconv_4x4_hp(
     const int DILATION_X = ENABLE_DILATION ? config.dilation[1] : 1;
     const int DILATION_Y = ENABLE_DILATION ? config.dilation[0] : 1;
 
-    int tile_start_out_y, tile_start_out_x, tile_start_in_y, tile_start_in_x, tile_start_z, batch;
-    calc_tile_indices_deconv<pixelsPerBlockX, pixelsPerBlockY, OUT_CHANNELS_PER_BLOCK, STRIDE, FULL_DEPTH, ENABLE_DILATION>(tile_start_out_y, tile_start_out_x, tile_start_in_y, tile_start_in_x, tile_start_z, batch, config, dim);
+    const int IN_PIXELS_OFFSET = divup(KERNEL_SIZE, STRIDE) - 1;
 
+    int tile_start_out_y, tile_start_out_x, tile_start_in_y, tile_start_in_x, tile_start_z, batch;
+    calc_tile_indices_deconv<pixelsPerBlockX, pixelsPerBlockY, OUT_CHANNELS_PER_BLOCK, STRIDE, FULL_DEPTH, ENABLE_DILATION, KERNEL_SIZE>(tile_start_out_y, tile_start_out_x, tile_start_in_y, tile_start_in_x, tile_start_z, batch, config, dim);
 
     scalar_t* batch_out = output + (batch * dim.out.h * dim.out.w * dim.out.c);
     const scalar_t* batch_in = input + (batch * dim.in.h * dim.in.w * dim.in.c);
     const uint32_t* batch_mask = mask == nullptr ? nullptr : mask + (batch * dim.in.h * dim.in.w);
     
     const int n_pixels_out = pixelsPerBlockX * pixelsPerBlockY;
-    const int KERNEL_SIZE = 4;
     const int K_HALF = (KERNEL_SIZE-1) / 2;
     // TODO check this equation. not sure if this really makes sense or is just randomly correct
-    const int w_in = (KERNEL_SIZE + pixelsPerBlockX - 1 + STRIDE - 1) / STRIDE;
-    const int h_in = (KERNEL_SIZE + pixelsPerBlockY - 1 + STRIDE - 1) / STRIDE;
+    // const int w_in = (KERNEL_SIZE + pixelsPerBlockX - 1 + STRIDE - 1) / STRIDE;
+    // const int h_in = (KERNEL_SIZE + pixelsPerBlockY - 1 + STRIDE - 1) / STRIDE;
+    const int w_in = pixelsPerBlockX / STRIDE + IN_PIXELS_OFFSET;
+    const int h_in = pixelsPerBlockY / STRIDE + IN_PIXELS_OFFSET;
     const int n_in_px = w_in * h_in;
     const int in_row_vals = dim.in.w * dim.in.c;
 
     const int lane_idx = threadIdx.x % WARP_SIZE;
     const int warp_idx = threadIdx.x / WARP_SIZE;
-    const int sub_warp_idx = lane_idx / 8;
-    const int sub_warp_lane_idx = lane_idx % 8;
+    // const int sub_warp_idx = lane_idx / 8;
+    // const int sub_warp_lane_idx = lane_idx % 8;
     const int n_warps = BLOCK_SIZE / WARP_SIZE;
 
     const uint16_t out_c_aligned = divup(dim.out.c, 2) * 2;
-    const uint16_t in_c_aligned = divup(dim.in.c, 2) * 2;
+    // const uint16_t in_c_aligned = divup(dim.in.c, 2) * 2;
 
     __shared__ uint32_t s_mask[n_in_px];
     __shared__ half2 s_in[n_in_px][WARP_SIZE];
@@ -659,22 +680,30 @@ __global__ void delta_deconv_4x4_hp(
             for (int i = 0; i < n_pixels_out; ++i) {
                 t_out[i] = 0;
             }
-            const int IN_OFF = -(KERNEL_SIZE/STRIDE) + 1; 
+            // const int IN_OFF = -(KERNEL_SIZE/STRIDE) + 1;
+            const int IN_OFF = 0;
             #pragma unroll
             for (int in_y = IN_OFF; in_y < h_in + IN_OFF; ++in_y) {
                 #pragma unroll
                 for (int in_x = IN_OFF; in_x < w_in + IN_OFF; ++in_x) {
                     const int val = is_px_mask_set<w_in, n_in_px>(in_x-IN_OFF, in_y-IN_OFF, t_mask, s_mask);
 
-                    const int min_f_y = Utils::constexpr_max(0, -in_y*STRIDE);
-                    const int min_f_x = Utils::constexpr_max(0, -in_x*STRIDE);
-                    const int max_f_y = Utils::constexpr_min(KERNEL_SIZE, pixelsPerBlockY - in_y*STRIDE);
-                    const int max_f_x = Utils::constexpr_min(KERNEL_SIZE, pixelsPerBlockX - in_x*STRIDE);
+                    // const int min_f_y = Utils::constexpr_max(0, -in_y*STRIDE);
+                    // const int min_f_x = Utils::constexpr_max(0, -in_x*STRIDE);
+                    // const int max_f_y = Utils::constexpr_min(KERNEL_SIZE, pixelsPerBlockY - in_y*STRIDE);
+                    // const int max_f_x = Utils::constexpr_min(KERNEL_SIZE, pixelsPerBlockX - in_x*STRIDE);
+                    const int min_f_y = Utils::constexpr_max(0, (IN_PIXELS_OFFSET-in_y)*STRIDE);
+                    const int min_f_x = Utils::constexpr_max(0, (IN_PIXELS_OFFSET-in_x)*STRIDE);
+                    const int max_f_y = Utils::constexpr_min(KERNEL_SIZE, pixelsPerBlockY - (in_y-IN_PIXELS_OFFSET)*STRIDE);
+                    const int max_f_x = Utils::constexpr_min(KERNEL_SIZE, pixelsPerBlockX - (in_x-IN_PIXELS_OFFSET)*STRIDE);
                     #pragma unroll
                     for (int f_y = min_f_y; f_y < max_f_y; ++f_y) {
                         #pragma unroll
                         for (int f_x = min_f_x; f_x < max_f_x; ++f_x) {
-                            const int t_out_idx = (in_y*STRIDE + f_y) * pixelsPerBlockX + (in_x*STRIDE + f_x);
+                            // const int t_out_idx = (in_y*STRIDE + f_y) * pixelsPerBlockX + (in_x*STRIDE + f_x);
+                            const int out_y = f_y + (in_y-IN_PIXELS_OFFSET) * STRIDE;
+                            const int out_x = f_x + (in_x-IN_PIXELS_OFFSET) * STRIDE;
+                            const int t_out_idx = out_y * pixelsPerBlockX + out_x;
                             t_out[t_out_idx] += val;
 #ifdef ENABLE_METRICS
                             n_active_inputs += val;
@@ -846,7 +875,8 @@ __global__ void delta_deconv_4x4_hp(
                         }
                     }
                 
-                    const int IN_OFF = -(KERNEL_SIZE/STRIDE) + 1; 
+                    // const int IN_OFF = -(KERNEL_SIZE/STRIDE) + 1;
+                    const int IN_OFF = 0;
                     // in_c % 2 check is used to speedup half2 multiplications without increasing registers much.
                     // if == 0 --> take values as is and multiply them with filter
                     // if != 0 --> swap values and multiply them with filter next filter pair
@@ -858,15 +888,22 @@ __global__ void delta_deconv_4x4_hp(
                             for (int in_x = IN_OFF; in_x < w_in + IN_OFF; ++in_x) {
                                 const half2 val = s_in[(in_y-IN_OFF) * w_in + (in_x-IN_OFF)][in_c/2];
 
-                                const int min_f_y = Utils::constexpr_max(0, -in_y*STRIDE);
-                                const int min_f_x = Utils::constexpr_max(0, -in_x*STRIDE);
-                                const int max_f_y = Utils::constexpr_min(KERNEL_SIZE, pixelsPerBlockY - in_y*STRIDE);
-                                const int max_f_x = Utils::constexpr_min(KERNEL_SIZE, pixelsPerBlockX - in_x*STRIDE);
+                                // const int min_f_y = Utils::constexpr_max(0, -in_y*STRIDE);
+                                // const int min_f_x = Utils::constexpr_max(0, -in_x*STRIDE);
+                                // const int max_f_y = Utils::constexpr_min(KERNEL_SIZE, pixelsPerBlockY - in_y*STRIDE);
+                                // const int max_f_x = Utils::constexpr_min(KERNEL_SIZE, pixelsPerBlockX - in_x*STRIDE);
+                                const int min_f_y = Utils::constexpr_max(0, (IN_PIXELS_OFFSET-in_y)*STRIDE);
+                                const int min_f_x = Utils::constexpr_max(0, (IN_PIXELS_OFFSET-in_x)*STRIDE);
+                                const int max_f_y = Utils::constexpr_min(KERNEL_SIZE, pixelsPerBlockY - (in_y-IN_PIXELS_OFFSET)*STRIDE);
+                                const int max_f_x = Utils::constexpr_min(KERNEL_SIZE, pixelsPerBlockX - (in_x-IN_PIXELS_OFFSET)*STRIDE);
                                 #pragma unroll
                                 for (int f_y = min_f_y; f_y < max_f_y; ++f_y) {
                                     #pragma unroll
                                     for (int f_x = min_f_x; f_x < max_f_x; ++f_x) {
-                                        const int t_out_idx = (in_y*STRIDE + f_y) * pixelsPerBlockX + (in_x*STRIDE + f_x);
+                                        const int out_y = f_y + (in_y-IN_PIXELS_OFFSET) * STRIDE;
+                                        const int out_x = f_x + (in_x-IN_PIXELS_OFFSET) * STRIDE;
+                                        const int t_out_idx = out_y * pixelsPerBlockX + out_x;
+                                        // const int t_out_idx = (in_y*STRIDE + f_y) * pixelsPerBlockX + (in_x*STRIDE + f_x);
                                         t_out[t_out_idx] = __hfma2(val, t_f[f_y*KERNEL_SIZE + f_x], t_out[t_out_idx]);
                                     }
                                 }
@@ -879,15 +916,22 @@ __global__ void delta_deconv_4x4_hp(
                             for (int in_x = IN_OFF; in_x < w_in + IN_OFF; ++in_x) {
                                 const half2 val = __lowhigh2highlow(s_in[(in_y-IN_OFF) * w_in + (in_x-IN_OFF)][in_c/2]);
 
-                                const int min_f_y = Utils::constexpr_max(0, -in_y*STRIDE);
-                                const int min_f_x = Utils::constexpr_max(0, -in_x*STRIDE);
-                                const int max_f_y = Utils::constexpr_min(KERNEL_SIZE, pixelsPerBlockY - in_y*STRIDE);
-                                const int max_f_x = Utils::constexpr_min(KERNEL_SIZE, pixelsPerBlockX - in_x*STRIDE);
+                                // const int min_f_y = Utils::constexpr_max(0, -in_y*STRIDE);
+                                // const int min_f_x = Utils::constexpr_max(0, -in_x*STRIDE);
+                                // const int max_f_y = Utils::constexpr_min(KERNEL_SIZE, pixelsPerBlockY - in_y*STRIDE);
+                                // const int max_f_x = Utils::constexpr_min(KERNEL_SIZE, pixelsPerBlockX - in_x*STRIDE);
+                                const int min_f_y = Utils::constexpr_max(0, (IN_PIXELS_OFFSET-in_y)*STRIDE);
+                                const int min_f_x = Utils::constexpr_max(0, (IN_PIXELS_OFFSET-in_x)*STRIDE);
+                                const int max_f_y = Utils::constexpr_min(KERNEL_SIZE, pixelsPerBlockY - (in_y-IN_PIXELS_OFFSET)*STRIDE);
+                                const int max_f_x = Utils::constexpr_min(KERNEL_SIZE, pixelsPerBlockX - (in_x-IN_PIXELS_OFFSET)*STRIDE);
                                 #pragma unroll
                                 for (int f_y = min_f_y; f_y < max_f_y; ++f_y) {
                                     #pragma unroll
                                     for (int f_x = min_f_x; f_x < max_f_x; ++f_x) {
-                                        const int t_out_idx = (in_y*STRIDE + f_y) * pixelsPerBlockX + (in_x*STRIDE + f_x);
+                                        const int out_y = f_y + (in_y-IN_PIXELS_OFFSET) * STRIDE;
+                                        const int out_x = f_x + (in_x-IN_PIXELS_OFFSET) * STRIDE;
+                                        const int t_out_idx = out_y * pixelsPerBlockX + out_x;
+                                        // const int t_out_idx = (in_y*STRIDE + f_y) * pixelsPerBlockX + (in_x*STRIDE + f_x);
                                         t_out[t_out_idx] = __hfma2(val, t_f[f_y*KERNEL_SIZE + f_x], t_out[t_out_idx]);
                                     }
                                 }
@@ -952,6 +996,7 @@ template<typename scalar_t = float>
 void delta_deconv(scalar_t *input, scalar_t *output, scalar_t *filter, scalar_t *bias, uint32_t *mask, uint32_t *out_mask, Dimensions dim, ConvConfig config) {
     const bool ENABLE_DILATION = false;
     if (config.stride[0] == 2 && config.stride[1] == 2 && config.kernel_size[0] == 4 && config.kernel_size[1] == 4 && config.groups == 1 && config.dilation[0] == 1 && config.dilation[1] == 1) {
+        const int kernel_size = 4;
         const int stride = 2;
         const int pixelsPerBlockX = 8;
         const int pixelsPerBlockY = 8;
@@ -964,11 +1009,31 @@ void delta_deconv(scalar_t *input, scalar_t *output, scalar_t *filter, scalar_t 
 
         dim3 gridDim(x, y, dim.batch_size * divup(dim.out.c, out_channels_per_block));
         
-        delta_deconv_4x4_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+        delta_deconv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
             input, output, filter, bias, mask, out_mask, dim, config);
-    } else {
-        printf("Transposed convolution only supports 4x4 kernels with groups=1 and stride=2 and dilation=1. Got k=%ix%i g=%i s=%ix%i\n", config.kernel_size[0], config.kernel_size[1], config.groups, config.stride[0], config.stride[1]);
-        throw "Transposed convolution only supports 4x4 kernels with groups=1 and stride=2 and dilation=1";
+    } else if (config.stride[0] == 4 && config.stride[1] == 4 && config.kernel_size[0] == 6 && config.kernel_size[1] == 6 && config.groups == 1 && config.dilation[0] == 1 && config.dilation[1] == 1) {
+        const int kernel_size = 6;
+        const int stride = 4;
+        const int pixelsPerBlockX = 8;
+        const int pixelsPerBlockY = 8;
+        // uint32_t blocks = dim.batch_size * divup(dim.out.h+config.padding[0], pixelsPerBlockY*config.dilation[0]) * divup(dim.out.w+config.padding[1], pixelsPerBlockX*config.dilation[1]) * config.dilation[0]*config.dilation[1];
+        // uint32_t y = divup(dim.out.h+config.padding[0], pixelsPerBlockY * config.dilation[0]) * config.dilation[0];
+        // uint32_t x = divup(dim.out.w+config.padding[1], pixelsPerBlockX * config.dilation[1]) * config.dilation[1];
+        
+        uint32_t y = divup(dim.out.h+config.padding[0], pixelsPerBlockY);
+        uint32_t x = divup(dim.out.w+config.padding[1], pixelsPerBlockX);
+
+        const uint32_t threads = 64;
+        const int out_channels_per_block = threads;
+
+        dim3 gridDim(x, y, dim.batch_size * divup(dim.out.c, out_channels_per_block));
+        
+        delta_deconv_sp<scalar_t, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, false, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+            input, output, filter, bias, mask, out_mask, dim, config);
+    }
+     else {
+        printf("Transposed convolution only supports 4x4/6x6 kernels with groups=1 and stride=2/4 and dilation=1. Got k=%ix%i g=%i s=%ix%i\n", config.kernel_size[0], config.kernel_size[1], config.groups, config.stride[0], config.stride[1]);
+        throw "Transposed convolution only supports 4x4/6x6 kernels with groups=1 and stride=2/4 and dilation=1";
     }
 }
 
@@ -977,22 +1042,39 @@ void delta_deconv(scalar_t *input, scalar_t *output, scalar_t *filter, scalar_t 
 void delta_deconv_hp(half *input, half *output, half *filter, half *bias, uint32_t *mask, uint32_t *out_mask, Dimensions dim, ConvConfig config) {
     const bool ENABLE_DILATION = false;
     if (config.stride[0] == 2 && config.stride[1] == 2 && config.kernel_size[0] == 4 && config.kernel_size[1] == 4 && config.groups == 1 && config.dilation[0] == 1 && config.dilation[1] == 1) {
+        const int kernel_size = 4;
         const int stride = 2;
-        const int pixelsPerBlockX = 6;
-        const int pixelsPerBlockY = 6;
-        uint32_t blocks = dim.batch_size * divup(dim.out.h+config.padding[0], pixelsPerBlockY*config.dilation[0]) * divup(dim.out.w+config.padding[1], pixelsPerBlockX*config.dilation[1]) * config.dilation[0]*config.dilation[1];
+        const int pixelsPerBlockX = 4;
+        const int pixelsPerBlockY = 4;
+        // uint32_t blocks = dim.batch_size * divup(dim.out.h+config.padding[0], pixelsPerBlockY*config.dilation[0]) * divup(dim.out.w+config.padding[1], pixelsPerBlockX*config.dilation[1]) * config.dilation[0]*config.dilation[1];
         uint32_t y = divup(dim.out.h+config.padding[0], pixelsPerBlockY * config.dilation[0]) * config.dilation[0];
         uint32_t x = divup(dim.out.w+config.padding[1], pixelsPerBlockX * config.dilation[1]) * config.dilation[1];
         
         dim3 gridDim(x, y, dim.batch_size);
         
-        const uint32_t threadsLarge = 256;
-        const int out_channels_per_block = threadsLarge;
-        delta_deconv_4x4_hp<half, pixelsPerBlockX, pixelsPerBlockY, threadsLarge, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threadsLarge>>>(
+        const uint32_t threads = 64;
+        const int out_channels_per_block = threads;
+        delta_deconv_hp_kernel<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
             input, output, filter, bias, mask, out_mask, dim, config);
-    } else {
-        printf("Transposed convolution only supports 4x4 kernels with groups=1 and stride=2 and dilation=1. Got k=%ix%i g=%i s=%ix%i\n", config.kernel_size[0], config.kernel_size[1], config.groups, config.stride[0], config.stride[1]);
-        throw "Transposed convolution only supports 4x4 kernels with groups=1 and stride=2 and dilation=1";
+    } else if (config.stride[0] == 4 && config.stride[1] == 4 && config.kernel_size[0] == 6 && config.kernel_size[1] == 6 && config.groups == 1 && config.dilation[0] == 1 && config.dilation[1] == 1) {
+        const int kernel_size = 6;
+        const int stride = 4;
+        const int pixelsPerBlockX = 4;
+        const int pixelsPerBlockY = 4;
+        // uint32_t blocks = dim.batch_size * divup(dim.out.h+config.padding[0], pixelsPerBlockY*config.dilation[0]) * divup(dim.out.w+config.padding[1], pixelsPerBlockX*config.dilation[1]) * config.dilation[0]*config.dilation[1];
+        uint32_t y = divup(dim.out.h+config.padding[0], pixelsPerBlockY * config.dilation[0]) * config.dilation[0];
+        uint32_t x = divup(dim.out.w+config.padding[1], pixelsPerBlockX * config.dilation[1]) * config.dilation[1];
+        
+        dim3 gridDim(x, y, dim.batch_size);
+        
+        const uint32_t threads = 64;
+        const int out_channels_per_block = threads;
+        delta_deconv_hp_kernel<half, kernel_size, pixelsPerBlockX, pixelsPerBlockY, threads, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threads>>>(
+            input, output, filter, bias, mask, out_mask, dim, config);
+    }
+     else {
+        printf("Transposed convolution only supports 4x4/6x6 kernels with groups=1 and stride=2/4 and dilation=1. Got k=%ix%i g=%i s=%ix%i\n", config.kernel_size[0], config.kernel_size[1], config.groups, config.stride[0], config.stride[1]);
+        throw "Transposed convolution only supports 4x4/6x6 kernels with groups=1 and stride=2/4 and dilation=1";
     }
 }
 
