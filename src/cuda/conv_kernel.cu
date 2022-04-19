@@ -3016,9 +3016,13 @@ void deltacnn_3x3_standard(scalar_t *input, scalar_t *output, scalar_t *filter, 
             const uint32_t threadsMedium = 96;
             deltacnn_3x3_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threadsMedium, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threadsMedium>>>(
                 input, output, filter, bias, mask, out_mask, dim, config);
-        } else {
+        } else if (dim.out.c > 32) {
             const uint32_t threadsSmall = 64;
             deltacnn_3x3_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threadsSmall, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threadsSmall>>>(
+                input, output, filter, bias, mask, out_mask, dim, config);
+        } else {
+            const uint32_t threadsTiny = 32;
+            deltacnn_3x3_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threadsTiny, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threadsTiny>>>(
                 input, output, filter, bias, mask, out_mask, dim, config);
         }
     } else if (config.stride[0] == 2 && config.stride[1] == 2) {
@@ -3072,9 +3076,13 @@ void deltacnn_3x3_standard(scalar_t *input, scalar_t *output, scalar_t *filter, 
             const uint32_t threadsMedium = 96;
             deltacnn_3x3_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threadsMedium, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threadsMedium>>>(
                 input, output, filter, bias, mask, out_mask, dim, config);
-        } else {
+        } else if (dim.out.c > 32) {
             const uint32_t threadsSmall = 64;
             deltacnn_3x3_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threadsSmall, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threadsSmall>>>(
+                input, output, filter, bias, mask, out_mask, dim, config);
+        } else {
+            const uint32_t threadsTiny = 32;
+            deltacnn_3x3_sp<scalar_t, pixelsPerBlockX, pixelsPerBlockY, threadsTiny, out_channels_per_block, true, true, stride, ENABLE_DILATION><<<gridDim, threadsTiny>>>(
                 input, output, filter, bias, mask, out_mask, dim, config);
         }
     } else {
