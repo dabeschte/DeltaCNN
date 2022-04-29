@@ -1570,7 +1570,7 @@ class DCBatchNorm2d(nn.BatchNorm2d, DCModule):
                 sparse_mul_add(out, out_mask, out, out_mask, self.scale, bias)
             else:
                 out = torch.empty_like(input)
-                out_mask = torch.empty_like(mask)
+                out_mask = mask.clone()
                 sparse_mul_add(input, mask, out, out_mask, self.scale, bias)
 
         if mask is not None:
