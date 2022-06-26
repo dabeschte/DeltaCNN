@@ -1,3 +1,8 @@
+# We moved our repository
+We moved our repository to [facebookresearch/DeltaCNN](https://github.com/facebookresearch/DeltaCNN). 
+For issues and latest updates, please visit [facebookresearch/DeltaCNN](https://github.com/facebookresearch/DeltaCNN).
+
+----------------
 # DeltaCNN
 
 DeltaCNN caches intermediate feature maps from previous frames to accelerate inference of new frames by only processing updated pixels.
@@ -254,3 +259,7 @@ As a rough overview, DeltaCNN features the following layers:
     month = jun
 }
 ```
+  
+## License
+
+`DeltaCNN` is released under the CC BY-NC 4.0 license.
